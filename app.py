@@ -1,35 +1,32 @@
 import os, requests, json, base64
 from flask import Flask, request
 
-# --- ⚙️ CONFIGURATION (ดักจับค่าจาก Environment Variables บน Render) ---
+# --- ⚙️ CONFIGURATION ---
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "OAVhx2FgzLP0Xj/JKxglQgwCyBI4moi0m+0RKSawaISs1nPzFDVuGYDhvw8Ujfz5skTrgRmg6VN0SfWBLqWN65QydPMpd2aVbEne2eyaRCI/jpHo1u/iHfdN7+oIC1thhCenN8/Ijzfo8g8th/lFhgdB04t89/1O/w1cDnyilFU=")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDwdL9g4gbo5gUeRVKOQRW15_inLlwmHOI")
 
 app = Flask(__name__)
 
-SYSTEM_PROMPT = """คุณคือแอดมินชื่อ 'น้อง WM ดีไซน์' จากร้าน Work Design By Me Phuket 🏝️
-บทบาท: รับออกแบบ ผลิต และติดตั้งสื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และงานกราฟิกดีไซน์ครบวงจร (ทั้ง Online & Offline)
+ACCOUNT_TEXT = (
+    "ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n"
+    "💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย\n"
+    "🏦 ธนาคาร: กสิกรไทย (K Bank)\n"
+    "💳 เลขที่บัญชี: 036-8-13702-2\n\n"
+    "ขอบคุณมากนะคะ 🙏"
+)
 
-[ข้อมูลสำคัญประจำร้าน]
-- ลิงก์เพจหลัก: https://www.facebook.com/workdesignbymephuketV2
-- พอร์ตแอดโฆษณา: https://www.facebook.com/media/set?vanity=workdesignbymephuketV2&set=a.122128209656083107
-- พอร์ตงานทั้งหมด: https://www.facebook.com/workdesignbymephuketV2/photos_albums
+SYSTEM_PROMPT = f"""คุณคือแอดมินจากร้าน Work Design By Me Phuket 🏝️
+บทบาท: รับออกแบบ ผลิต และติดตั้งสื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และงานกราฟิกดีไซน์ครบวงจร
 
-[💵 ข้อมูลการชำระเงิน (กฎเหล็ก: ห้ามใช้ดอกจัน ** เด็ดขาด ให้ใช้ตามแพทเทิร์นนี้เป๊ะๆ)]
+[💵 ข้อมูลการชำระเงิน]
 เมื่อลูกค้าขอบัญชีโอนเงิน ให้ส่งข้อความรูปแบบนี้เท่านั้น:
-ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊
-
-💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย
-🏦 ธนาคาร: กสิกรไทย (K Bank)
-💳 เลขที่บัญชี: 036-8-13702-2
-
-ขอบคุณมากนะคะ 🙏
+{ACCOUNT_TEXT}
 
 [🧭 แนวทางการตอบสนันสนทนาแบบมนุษย์คุย]
-1. ห้ามพิมพ์คำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองขึ้นต้นประโยคเด็ดขาด ให้พิมพ์ตัวเนื้อหาข้อความตอบกลับไปเลยทันทีเหมือนคนกดพิมพ์แชทตอบเอง
+1. ห้ามพิมพ์คำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองขึ้นต้นประโยคเด็ดขาด ให้พิมพ์ตัวเนื้อหาข้อความตอบกลับไปเลยทันที
 2. ห้ามใช้สัญลักษณ์ดอกจัน (**) ในการเน้นคำเด็ดขาด ให้แทนด้วยอีโมจิที่ดูไม่เครียด สบายตา เป็นกันเอง
-3. วิธีแทนตัวเอง: แทนตัวเองว่า 'น้อง WM ดีไซน์' หรือ 'หนู' ได้ตามความเหมาะสมในประโยค แต่ห้ามนำมาใส่เป็นหัวข้อคำพูดคุย
-4. การตอบคำถามทั่วไป: ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีจังหวะจบประโยคลงท้ายด้วย 'ค่ะ/นะคะ' เสมอ"""
+3. วิธีแทนตัวเอง: แทนตัวเองว่า 'น้อง WM ดีไซน์' หรือ 'หนู' ได้ตามความเหมาะสมในประโยค
+4. ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีจังหวะจบประโยคลงท้ายด้วย 'ค่ะ/นะคะ' เสมอ"""
 
 user_chat_histories = {}
 processed_webhook_ids = set()
@@ -40,14 +37,14 @@ def get_clean_history(user_id):
     return user_chat_histories[user_id]
 
 def ask_wm_design_multimodal(user_id, user_input, image_data=None):
+    # ดักจับคำว่าบัญชีหรือโอนเงินแบบเด็ดขาด 100%
+    if "บัญชี" in user_input or "โอน" in user_input or "เลขบช" in user_input:
+        return ACCOUNT_TEXT
+
     history = get_clean_history(user_id)
     context_str = "".join([f"{role}: {text}\n" for role, text in history[-4:]])
     
-    models_to_try = [
-        "models/gemini-2.5-flash",
-        "models/gemini-2.5-pro"
-    ]
-    
+    models_to_try = ["models/gemini-2.5-flash", "models/gemini-2.5-pro"]
     parts = [{"text": f"{SYSTEM_PROMPT}\n\n[บทสนทนาก่อนหน้า]\n{context_str}\nคุณลูกค้าส่งข้อมูลล่าสุด: {user_input}"}]
     if image_data:
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_data}})
@@ -65,7 +62,6 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
             if 'candidates' in res_json:
                 reply = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # ดักจับเคลียร์หัวประโยคซ้ำซ้อนซ้ำอีกรอบเพื่อความชัวร์ 100%
                 if reply.startswith("น้อง WM ดีไซน์:"):
                     reply = reply.replace("น้อง WM ดีไซน์:", "").strip()
                 if reply.startswith("น้อง WM ดีไซน์"):
@@ -78,10 +74,6 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
         except:
             continue
             
-    # กรณีฉุกเฉินที่สุด
-    if "บัญชี" in user_input or "โอน" in user_input:
-        return "ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย\n🏦 ธนาคาร: กสิกรไทย (K Bank)\n💳 เลขที่บัญชี: 036-8-13702-2\n\nขอบคุณมากนะคะ 🙏"
-    
     return "รับทราบข้อมูลเรียบร้อยค่ะคุณลูกค้า มีรายละเอียดงานพิมพ์หรือป้ายโฆษณาส่วนไหนเพิ่มเติม แจ้งหนูไว้ได้เลยนะคะ เดี๋ยวรีบตรวจเช็กสเปกให้ทันทีค่ะ ✨💎"
 
 @app.route("/callback", methods=['POST'])
