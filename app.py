@@ -1,5 +1,6 @@
 import os, requests, json, base64
 from flask import Flask, request
+from datetime import datetime
 
 # --- ⚙️ CONFIGURATION ---
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "OAVhx2FgzLP0Xj/JKxglQgwCyBI4moi0m+0RKSawaISs1nPzFDVuGYDhvw8Ujfz5skTrgRmg6VN0SfWBLqWN65QydPMpd2aVbEne2eyaRCI/jpHo1u/iHfdN7+oIC1thhCenN8/Ijzfo8g8th/lFhgdB04t89/1O/w1cDnyilFU=")
@@ -15,20 +16,20 @@ ACCOUNT_TEXT = (
     "ขอบคุณมากนะคะ 🙏"
 )
 
-SYSTEM_PROMPT = f"""คุณคือแอดมินจากร้าน Work Design By Me Phuket 🏝️
-บทบาท: รับออกแบบ ผลิต และติดตั้งสื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และงานกราฟิกดีไซน์ครบวงจร
+SYSTEM_PROMPT = f"""คุณคือแอดมินจากร้าน Work Design By Me Phuket 🏝️ รับออกแบบ ผลิต สื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และกราฟิกดีไซน์ครบวงจร
 
 [💵 ข้อมูลการชำระเงิน]
-เมื่อลูกค้าขอบัญชีโอนเงิน ให้ส่งข้อความรูปแบบนี้เท่านั้น:
+เมื่อลูกค้าขอบัญชีโอนเงิน ให้ตอบด้วยข้อความนี้เท่านั้น:
 {ACCOUNT_TEXT}
 
-[🧭 แนวทางการตอบสนันสนทนาแบบมนุษย์คุย]
-1. ห้ามพิมพ์คำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองขึ้นต้นประโยคเด็ดขาด ให้พิมพ์ตัวเนื้อหาข้อความตอบกลับไปเลยทันที
-2. ห้ามใช้สัญลักษณ์ดอกจัน (**) ในการเน้นคำเด็ดขาด ให้แทนด้วยอีโมจิที่ดูไม่เครียด สบายตา เป็นกันเอง
-3. วิธีแทนตัวเอง: แทนตัวเองว่า 'น้อง WM ดีไซน์' หรือ 'หนู' ได้ตามความเหมาะสมในประโยค
-4. ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีจังหวะจบประโยคลงท้ายด้วย 'ค่ะ/นะคะ' เสมอ"""
+[🧭 แนวทางการตอบแบบคนจริง (ห้ามลืมเด็ดขาด)]
+1. ตอบให้กระชับ สั้น และได้ใจความที่สุด เหมือนคนพิมพ์คุยกันทางไลน์ ไม่เอาข้อความยาวเป็นพรืดหรือข้อมูลเยอะเกินไป มันดูเครียดและเหมือนหุ่นยนต์
+2. ห้ามมีคำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองแปะหัวข้อความเด็ดขาด ให้พิมพ์ประโยคคำตอบส่งไปเลย
+3. ห้ามใช้สัญลักษณ์ดอกจัน (**) ในการเน้นคำ ให้ใช้ภาษาสุภาพ เป็นกันเอง มีหางเสียง 'ค่ะ/นะคะ' เหมาะสม
+4. ถ้าในประโยคมีข้อมูลการทักทาย ให้ตอบรับอย่างเป็นธรรมชาติและเข้าเรื่องงานทันที"""
 
 user_chat_histories = {}
+user_last_greeting_date = {} # เก็บวันที่ที่สวัสดีล่าสุดของแต่ละคน
 processed_webhook_ids = set()
 
 def get_clean_history(user_id):
@@ -40,18 +41,27 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
     if "บัญชี" in user_input or "โอน" in user_input or "เลขบช" in user_input:
         return ACCOUNT_TEXT
 
+    # ตรวจสอบเรื่องการทักทายในวันเดียวกัน
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    already_greeted = (user_last_greeting_date.get(user_id) == today_str)
+    
+    greeting_condition = ""
+    if already_greeted:
+        greeting_condition = "\n*(ข้อกำหนด: วันนี้คุณได้ทักทายลูกค้าคนนี้ไปแล้ว ห้ามพิมพ์คำว่า สวัสดีค่ะ หรือทักทายซ้ำอีก ให้ตอบเข้าเรื่องหรือคุยต่อได้เลย)*"
+    else:
+        greeting_condition = "\n*(ข้อกำหนด: นี่เป็นการคุยครั้งแรกของวัน สามารถทักทายหรือสวัสดีค่ะได้ตามเหมาะสม)*"
+
     history = get_clean_history(user_id)
     context_str = "".join([f"{role}: {text}\n" for role, text in history[-4:]])
     
     models_to_try = ["models/gemini-2.5-flash", "models/gemini-2.5-pro"]
-    parts = [{"text": f"{SYSTEM_PROMPT}\n\n[บทสนทนาก่อนหน้า]\n{context_str}\nคุณลูกค้าส่งข้อมูลล่าสุด: {user_input}"}]
+    parts = [{"text": f"{SYSTEM_PROMPT}{greeting_condition}\n\n[บทสนทนาก่อนหน้า]\n{context_str}\nคุณลูกค้าส่งข้อมูลล่าสุด: {user_input}"}]
     if image_data:
         parts.append({"inlineData": {"mimeType": "image/jpeg", "data": image_data}})
         
     payload = {
         "contents": [{"parts": parts}],
-        # 🚀 ปรับเพิ่มเป็น 2000 เพื่อแก้ปัญหาภาษาไทยโดนตัดจบกลางประโยค
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2000}
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 1000}
     }
     
     for model_id in models_to_try:
@@ -67,6 +77,10 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
                 if reply.startswith("น้อง WM ดีไซน์"):
                     reply = reply.replace("น้อง WM ดีไซน์", "").strip()
                 
+                # ถ้าบอทมีการพิมพ์ทักทายไปแล้ว (หรือระบบสั่งให้เริ่มวันใหม่) บันทึกวันที่ไว้
+                if "สวัสดี" in reply or not already_greeted:
+                    user_last_greeting_date[user_id] = today_str
+                
                 history.append(("คุณลูกค้า", user_input))
                 history.append(("แอดมิน", reply))
                 user_chat_histories[user_id] = history[-8:]
@@ -74,7 +88,7 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
         except:
             continue
             
-    return "รับทราบข้อมูลเรียบร้อยค่ะคุณลูกค้า มีรายละเอียดงานพิมพ์หรือป้ายโฆษณาส่วนไหนเพิ่มเติม แจ้งหนูไว้ได้เลยนะคะ เดี๋ยวรีบตรวจเช็กสเปกให้ทันทีค่ะ ✨💎"
+    return "รับทราบค่ะคุณลูกค้า มีรายละเอียดงานพิมพ์หรือป้ายโฆษณาตรงไหนเพิ่มเติม แจ้งไว้ได้เลยนะคะ เดี๋ยวหนูเช็กสเปกให้ทันทีค่ะ ✨"
 
 @app.route("/callback", methods=['POST'])
 def callback():
