@@ -37,7 +37,6 @@ def get_clean_history(user_id):
     return user_chat_histories[user_id]
 
 def ask_wm_design_multimodal(user_id, user_input, image_data=None):
-    # ดักจับคำว่าบัญชีหรือโอนเงินแบบเด็ดขาด 100%
     if "บัญชี" in user_input or "โอน" in user_input or "เลขบช" in user_input:
         return ACCOUNT_TEXT
 
@@ -51,7 +50,8 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
         
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 500}
+        # 🚀 ปรับเพิ่มเป็น 2000 เพื่อแก้ปัญหาภาษาไทยโดนตัดจบกลางประโยค
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 2000}
     }
     
     for model_id in models_to_try:
