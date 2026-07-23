@@ -22,14 +22,18 @@ SYSTEM_PROMPT = f"""คุณคือแอดมินจากร้าน Wo
 เมื่อลูกค้าขอบัญชีโอนเงิน ให้ตอบด้วยข้อความนี้เท่านั้น:
 {ACCOUNT_TEXT}
 
-[🧭 แนวทางการตอบแบบคนจริง (ห้ามลืมเด็ดขาด)]
-1. ตอบให้กระชับ สั้น และได้ใจความที่สุด เหมือนคนพิมพ์คุยกันทางไลน์ ไม่เอาข้อความยาวเป็นพรืดหรือข้อมูลเยอะเกินไป มันดูเครียดและเหมือนหุ่นยนต์
-2. ห้ามมีคำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองแปะหัวข้อความเด็ดขาด ให้พิมพ์ประโยคคำตอบส่งไปเลย
-3. ห้ามใช้สัญลักษณ์ดอกจัน (**) ในการเน้นคำ ให้ใช้ภาษาสุภาพ เป็นกันเอง มีหางเสียง 'ค่ะ/นะคะ' เหมาะสม
-4. ถ้าในประโยคมีข้อมูลการทักทาย ให้ตอบรับอย่างเป็นธรรมชาติและเข้าเรื่องงานทันที"""
+[⛔ กฎเหล็กเรื่องราคา (ห้ามละเมิดเด็ดขาด!)]
+1. ห้ามคิดคำนวณ ห้ามเดาสุ่ม หรือพิมพ์ตัวเลขราคาเองเด็ดขาด! 
+2. หากลูกค้าถามเรื่องราคา ไม่ว่าจะงานอะไรก็ตาม ให้ตอบประโยคนี้เท่านั้น เพื่อให้แอดมินมาประเมินราคาจริง:
+   "รายละเอียดสเปกและราคาตรงนี้ เดี๋ยวหนูขอเช็กสเปกกับทีมช่าง แล้วรีบแจ้งกลับนะคะ 😊"
+
+[🧭 แนวทางการตอบแบบมนุษย์คุย]
+1. ตอบให้กระชับ สั้น ได้ใจความ ไม่เอาข้อความยาวเป็นพรืด
+2. ห้ามมีคำว่า 'น้อง WM ดีไซน์:' หรือชื่อตัวเองแปะหัวข้อความเด็ดขาด
+3. ห้ามใช้สัญลักษณ์ดอกจัน (**) ในการเน้นคำ ให้ใช้ภาษาสุภาพ เป็นกันเอง มีหางเสียง 'ค่ะ/นะคะ' เหมาะสม"""
 
 user_chat_histories = {}
-user_last_greeting_date = {} # เก็บวันที่ที่สวัสดีล่าสุดของแต่ละคน
+user_last_greeting_date = {}
 processed_webhook_ids = set()
 
 def get_clean_history(user_id):
@@ -41,7 +45,6 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
     if "บัญชี" in user_input or "โอน" in user_input or "เลขบช" in user_input:
         return ACCOUNT_TEXT
 
-    # ตรวจสอบเรื่องการทักทายในวันเดียวกัน
     today_str = datetime.now().strftime("%Y-%m-%d")
     already_greeted = (user_last_greeting_date.get(user_id) == today_str)
     
@@ -61,7 +64,7 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
         
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 1000}
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1000}
     }
     
     for model_id in models_to_try:
@@ -77,7 +80,6 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
                 if reply.startswith("น้อง WM ดีไซน์"):
                     reply = reply.replace("น้อง WM ดีไซน์", "").strip()
                 
-                # ถ้าบอทมีการพิมพ์ทักทายไปแล้ว (หรือระบบสั่งให้เริ่มวันใหม่) บันทึกวันที่ไว้
                 if "สวัสดี" in reply or not already_greeted:
                     user_last_greeting_date[user_id] = today_str
                 
@@ -88,7 +90,7 @@ def ask_wm_design_multimodal(user_id, user_input, image_data=None):
         except:
             continue
             
-    return "รับทราบค่ะคุณลูกค้า มีรายละเอียดงานพิมพ์หรือป้ายโฆษณาตรงไหนเพิ่มเติม แจ้งไว้ได้เลยนะคะ เดี๋ยวหนูเช็กสเปกให้ทันทีค่ะ ✨"
+    return "รายละเอียดสเปกและราคาตรงนี้ เดี๋ยวหนูขอเช็กสเปกกับทีมช่าง แล้วรีบแจ้งกลับนะคะ 😊"
 
 @app.route("/callback", methods=['POST'])
 def callback():
