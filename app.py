@@ -8,6 +8,8 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDwdL9g4gbo5gUeRVKOQRW15
 
 app = Flask(__name__)
 
+PORTFOLIO_URL = "https://www.facebook.com/workdesignbymephuketV2"
+
 ACCOUNT_TEXT = (
     "น้อง WM ดีไซน์ 🤖 ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n"
     "💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย\n"
@@ -22,8 +24,12 @@ SYSTEM_PROMPT = f"""คุณคือระบบ AI อัตโนมัต�
 เมื่อลูกค้าขอบัญชีโอนเงิน ให้ตอบด้วยข้อความนี้เท่านั้น:
 {ACCOUNT_TEXT}
 
+[🖼️ การส่งผลงานตัวอย่าง/พอร์ตโฟลิโอ (สำคัญมาก)]
+หากลูกค้าขอดูตัวอย่างงาน ขอดูผลงาน ขอดูรูปป้าย หรือขอดูตัวอย่างงานเก่าๆ ให้ส่งลิงก์ผลงานนี้ให้ลูกค้าเสมอ:
+{PORTFOLIO_URL}
+
 [🤖 กฎเหล็กรูปแบบการตอบข้อความ (ห้ามลืมเด็ดขาด!)]
-1. ให้แทนตัวเองว่า 'น้อง WM ดีไซน์ 🤖' เสมอ เพื่อให้ลูกค้ารู้ว่าเป็นระบบ AI อัตโนมัติของร้านตอบ
+1. ห้ามใส่คำว่า 'น้อง WM ดีไซน์:' หรือ 'น้อง WM ดีไซน์ 🤖' ซ้ำที่หัวประโยค ให้พิมพ์ตัวข้อความคำตอบส่งออกไปเลย
 2. หากลูกค้าถามเรื่องราคา สามารถประเมินราคาคร่าวๆ อ้างอิงจากราคางานเก่าทั่วไปได้ แต่ต้องระบุท้ายข้อความเสมอว่า:
    "(หมายเหตุ: ราคานี้เป็นเพียงราคาประมาณการคร่าวๆ นะคะ ราคาคงที่แน่นอนต้องรอแอดมินยืนยันให้อีกครั้งค่ะ 😊)"
 3. หากลูกค้าส่งข้อมูลหรือรายละเอียดงานมาหลายๆ ข้อความติดต่อกัน ให้สรุปรวบยอดและตอบรับทราบในข้อความเดียวอย่างเป็นธรรมชาติ
@@ -62,7 +68,6 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
         
     payload = {
         "contents": [{"parts": parts}],
-        # 🚀 เพิ่มขยายเป็น 1500 เพื่อแก้ปัญหาภาษาไทยตัดจบคำขาด
         "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1500}
     }
     
@@ -74,12 +79,21 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             if 'candidates' in res_json:
                 reply = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # เช็กให้แน่ใจว่าใช้คำว่า น้อง WM ดีไซน์ 🤖 นำหน้าหรือแทนตัวเองอย่างถูกต้อง
+                # เคลียร์หัวประโยคซ้ำซ้อนเพื่อให้การแสดงผลใน LINE คลีนที่สุด
+                if reply.startswith("น้อง WM ดีไซน์ 🤖:"):
+                    reply = reply.replace("น้อง WM ดีไซน์ 🤖:", "").strip()
+                if reply.startswith("น้อง WM ดีไซน์ 🤖"):
+                    reply = reply.replace("น้อง WM ดีไซน์ 🤖", "").strip()
+                if reply.startswith("น้อง WM ดีไซน์:"):
+                    reply = reply.replace("น้อง WM ดีไซน์:", "").strip()
+                if reply.startswith("น้อง WM ดีไซน์"):
+                    reply = reply.replace("น้อง WM ดีไซน์", "").strip()
+
                 if "สวัสดี" in reply or not already_greeted:
                     user_last_greeting_date[user_id] = today_str
                 
                 history.append(("คุณลูกค้า", combined_text))
-                history.append(("น้อง WM ดีไซน์ 🤖", reply))
+                history.append(("แอดมิน (AI)", reply))
                 user_chat_histories[user_id] = history[-8:]
                 return reply
         except:
