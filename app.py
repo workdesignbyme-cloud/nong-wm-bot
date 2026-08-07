@@ -9,30 +9,30 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AIzaSyDwdL9g4gbo5gUeRVKOQRW15
 app = Flask(__name__)
 
 ACCOUNT_TEXT = (
-    "🤖 ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n"
+    "น้อง WM ดีไซน์ 🤖 ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n"
     "💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย\n"
     "🏦 ธนาคาร: กสิกรไทย (K Bank)\n"
     "💳 เลขที่บัญชี: 036-8-13702-2\n\n"
     "ขอบคุณมากนะคะ 🙏"
 )
 
-SYSTEM_PROMPT = f"""คุณคือระบบ AI อัตโนมัติ (แอดมินบอท) ของร้าน Work Design By Me Phuket 🏝️ รับออกแบบ ผลิต สื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และเมนูอาหารครบวงจร
+SYSTEM_PROMPT = f"""คุณคือระบบ AI อัตโนมัติชื่อ 'น้อง WM ดีไซน์ 🤖' ของร้าน Work Design By Me Phuket 🏝️ รับออกแบบ ผลิต สื่อสิ่งพิมพ์ ป้ายโฆษณา สติกเกอร์ และเมนูอาหารครบวงจร
 
 [💵 ข้อมูลการชำระเงิน]
 เมื่อลูกค้าขอบัญชีโอนเงิน ให้ตอบด้วยข้อความนี้เท่านั้น:
 {ACCOUNT_TEXT}
 
 [🤖 กฎเหล็กรูปแบบการตอบข้อความ (ห้ามลืมเด็ดขาด!)]
-1. ต้องขึ้นต้นข้อความด้วยอีโมจิหุ่นยนต์ '🤖 ' เสมอทุกครั้ง เพื่อให้ลูกค้ารู้ว่าเป็น AI ตอบ
+1. ให้แทนตัวเองว่า 'น้อง WM ดีไซน์ 🤖' เสมอ เพื่อให้ลูกค้ารู้ว่าเป็นระบบ AI อัตโนมัติของร้านตอบ
 2. หากลูกค้าถามเรื่องราคา สามารถประเมินราคาคร่าวๆ อ้างอิงจากราคางานเก่าทั่วไปได้ แต่ต้องระบุท้ายข้อความเสมอว่า:
    "(หมายเหตุ: ราคานี้เป็นเพียงราคาประมาณการคร่าวๆ นะคะ ราคาคงที่แน่นอนต้องรอแอดมินยืนยันให้อีกครั้งค่ะ 😊)"
 3. หากลูกค้าส่งข้อมูลหรือรายละเอียดงานมาหลายๆ ข้อความติดต่อกัน ให้สรุปรวบยอดและตอบรับทราบในข้อความเดียวอย่างเป็นธรรมชาติ
-4. ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีหางเสียง 'ค่ะ/นะคะ' เหมาะสม ห้ามใช้สัญลักษณ์ดอกจัน (**) เด็ดขาด"""
+4. ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีหางเสียง 'ค่ะ/นะคะ' จบประโยคให้สมบูรณ์ ห้ามโดนตัดจบกลางคัน ห้ามใช้สัญลักษณ์ดอกจัน (**) เด็ดขาด"""
 
 user_chat_histories = {}
 user_last_greeting_date = {}
-pending_messages = {} # สำหรับสะสมข้อความในระยะเวลา 1 นาที
-timers = {} # สำหรับหน่วงเวลาตอบ 60 วินาที
+pending_messages = {}
+timers = {}
 
 def get_clean_history(user_id):
     if user_id not in user_chat_histories:
@@ -62,42 +62,38 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
         
     payload = {
         "contents": [{"parts": parts}],
-        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 600}
+        # 🚀 เพิ่มขยายเป็น 1500 เพื่อแก้ปัญหาภาษาไทยตัดจบคำขาด
+        "generationConfig": {"temperature": 0.4, "maxOutputTokens": 1500}
     }
     
     for model_id in models_to_try:
         url = f"https://generativelanguage.googleapis.com/v1beta/{model_id}:generateContent?key={GEMINI_API_KEY}"
         try:
-            response = requests.post(url, json=payload, timeout=6)
+            response = requests.post(url, json=payload, timeout=8)
             res_json = response.json()
             if 'candidates' in res_json:
                 reply = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # บังคับใส่สัญลักษณ์หุ่นยนต์นำหน้าถ้า AI ลืมใส่
-                if not reply.startswith("🤖"):
-                    reply = "🤖 " + reply
-                
+                # เช็กให้แน่ใจว่าใช้คำว่า น้อง WM ดีไซน์ 🤖 นำหน้าหรือแทนตัวเองอย่างถูกต้อง
                 if "สวัสดี" in reply or not already_greeted:
                     user_last_greeting_date[user_id] = today_str
                 
                 history.append(("คุณลูกค้า", combined_text))
-                history.append(("แอดมิน (AI)", reply))
+                history.append(("น้อง WM ดีไซน์ 🤖", reply))
                 user_chat_histories[user_id] = history[-8:]
                 return reply
         except:
             continue
             
-    return "🤖 รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
+    return "น้อง WM ดีไซน์ 🤖 รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
 
 def process_and_send_reply(u_id, r_token):
-    # ฟังก์ชันดึงข้อความที่สะสมไว้ใน 1 นาทีมาประมวลผลคำตอบเดียว
-    time.sleep(60) # รอ 1 นาที (60 วินาที)
+    time.sleep(60) # หน่วงเวลารอข้อความรัวๆ 1 นาที
     
     if u_id in pending_messages:
         msg_list = pending_messages.pop(u_id, [])
         img_b64 = None
         
-        # รวบข้อความทั้งหมดที่ลูกค้าพิมพ์ส่งมาหลายๆ ครั้งเป็นก้อนเดียว
         combined_msg = "\n".join([m['text'] for m in msg_list if m['text']])
         for m in msg_list:
             if m.get('img'):
@@ -139,12 +135,10 @@ def callback():
             else:
                 continue
 
-            # สะสมข้อความเข้าคิว
             if u_id not in pending_messages:
                 pending_messages[u_id] = []
             pending_messages[u_id].append({'text': u_msg, 'img': img_b64})
 
-            # ถ้าระบบมีตัวนับเวลาเดิมอยู่ ให้ยกเลิกแล้วเริ่มนับ 1 นาทีใหม่ (เพื่อรอข้อความล่าสุดของลูกค้า)
             if u_id in timers:
                 timers[u_id].cancel()
                 
