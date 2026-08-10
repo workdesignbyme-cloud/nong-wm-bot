@@ -31,13 +31,14 @@ SYSTEM_PROMPT = f"""คุณคือระบบ AI อัตโนมัต�
 [🤖 กฎเหล็กรูปแบบการตอบข้อความ (ห้ามลืมเด็ดขาด!)]
 1. ห้ามใส่คำว่า 'น้อง WM ดีไซน์:' หรือ 'น้อง WM ดีไซน์ 🤖' ซ้ำที่หัวประโยค ให้พิมพ์ตัวข้อความคำตอบส่งออกไปเลย
 2. หากลูกค้าถามเรื่องราคา สามารถประเมินราคาคร่าวๆ อ้างอิงจากราคางานเก่าทั่วไปได้ แต่ต้องระบุท้ายข้อความเสมอว่า:
-   "(หมายเหตุ: ราคานี้เป็นเพียงราคาประมาณการคร่าวๆ นะคะ ราคาคงที่แน่นอนต้องรอแอดมินยืนยันให้อีกครั้งค่ะ 😊)"
+   "(หมายเหตุ: ราคานี้เป็นเพียงราคาประมาณการคร่าวๆ นะคะ ราคาคงที่แน่นอนต้องรอแอดมินยืนยันใหีกครั้งค่ะ 😊)"
 3. หากลูกค้าส่งข้อมูลหรือรายละเอียดงานมาหลายๆ ข้อความติดต่อกัน ให้สรุปรวบยอดและตอบรับทราบในข้อความเดียวอย่างเป็นธรรมชาติ
 4. ตอบสั้น กระชับ ตรงประเด็น สุภาพ มีหางเสียง 'ค่ะ/นะคะ' จบประโยคให้สมบูรณ์ ห้ามโดนตัดจบกลางคัน ห้ามใช้สัญลักษณ์ดอกจัน (**) เด็ดขาด"""
 
 user_chat_histories = {}
 user_last_greeting_date = {}
 pending_messages = {}
+latest_reply_tokens = {}
 timers = {}
 
 def get_clean_history(user_id):
@@ -79,7 +80,6 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             if 'candidates' in res_json:
                 reply = res_json['candidates'][0]['content']['parts'][0]['text'].strip()
                 
-                # เคลียร์หัวประโยคซ้ำซ้อนเพื่อให้การแสดงผลใน LINE คลีนที่สุด
                 if reply.startswith("น้อง WM ดีไซน์ 🤖:"):
                     reply = reply.replace("น้อง WM ดีไซน์ 🤖:", "").strip()
                 if reply.startswith("น้อง WM ดีไซน์ 🤖"):
@@ -101,11 +101,13 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             
     return "น้อง WM ดีไซน์ 🤖 รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
 
-def process_and_send_reply(u_id, r_token):
-    time.sleep(60) # หน่วงเวลารอข้อความรัวๆ 1 นาที
+def process_and_send_reply(u_id):
+    # ปรับหน่วงเวลาลงเหลือ 15 วินาที เพื่อไม่ให้ replyToken ของ LINE หมดอายุ
+    time.sleep(15) 
     
-    if u_id in pending_messages:
+    if u_id in pending_messages and u_id in latest_reply_tokens:
         msg_list = pending_messages.pop(u_id, [])
+        r_token = latest_reply_tokens.pop(u_id, None)
         img_b64 = None
         
         combined_msg = "\n".join([m['text'] for m in msg_list if m['text']])
@@ -152,11 +154,15 @@ def callback():
             if u_id not in pending_messages:
                 pending_messages[u_id] = []
             pending_messages[u_id].append({'text': u_msg, 'img': img_b64})
+            
+            # อัปเดต Token ล่าสุดเสมอ
+            latest_reply_tokens[u_id] = r_token
 
-            if u_id in timers:
+            # หากมี Timer เก่า ให้ยกเลิกแล้วเริ่มนับ 15 วินาทีใหม่สำหรับคิวล่าสุด
+            if u_id in timers and timers[u_id].is_alive():
                 timers[u_id].cancel()
                 
-            t = threading.Thread(target=process_and_send_reply, args=(u_id, r_token))
+            t = threading.Timer(15.0, process_and_send_reply, args=[u_id])
             timers[u_id] = t
             t.start()
 
