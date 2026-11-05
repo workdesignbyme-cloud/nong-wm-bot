@@ -238,13 +238,40 @@ def log_customer_event(line_user_id, customer_text, ai_reply, image_received=Fal
         json={"majorDimension": "ROWS", "values": row}
     )
 
+def notify_admin_new_lead():
+    if not ADMIN_LINE_USER_ID or not LINE_ACCESS_TOKEN:
+        app.logger.warning("Admin LINE notification is not configured")
+        return
+
+    payload = {
+        "to": ADMIN_LINE_USER_ID,
+        "messages": [{
+            "type": "text",
+            "text": "🔔 WM Design\nมีลูกค้าติดต่อเข้ามาใหม่ค่ะ\nกรุณาตรวจสอบข้อมูลใน Google Sheets: LINE_Leads"
+        }]
+    }
+
+    try:
+        response = requests.post(
+            "https://api.line.me/v2/bot/message/push",
+            headers={
+                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                "Content-Type": "application/json"
+            },
+            json=payload,
+            timeout=15
+        )
+        response.raise_for_status()
+    except requests.RequestException:
+        app.logger.exception("Admin LINE notification failed")
 
 def _log_event_async(user_id, customer_text, reply_text, image_received):
     try:
         log_customer_event(user_id, customer_text, reply_text, image_received)
     except Exception:
-        app.logger.exception("Could not write LINE lead event to Google Sheets")
+        app.logger.exception("Could not write LINE lead event")
 
+    notify_admin_new_lead()
 
 def process_and_send_reply(user_id):
     # Called by a debounce timer; do not sleep again (avoids double delay).
