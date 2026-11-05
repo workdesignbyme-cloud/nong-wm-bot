@@ -2,17 +2,19 @@ import os
 import json
 import time
 import hmac
+import io
 import base64
 import hashlib
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
 import requests
-from flask import Flask, request
+from flask import Flask, request, send_file
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
+from promo_campaign import build_monthly_artwork_png, decrypt_recipient_id, encrypt_recipient_id
 
 # Secrets are intentionally read ONLY from Render Environment Variables.
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "").strip()
@@ -26,6 +28,8 @@ ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "")
 META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "").strip()
 META_APP_SECRET = os.environ.get("META_APP_SECRET", "").strip()
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip()
+PROMO_CAMPAIGN_SECRET = os.environ.get("PROMO_CAMPAIGN_SECRET", "").strip()
+PUBLIC_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://nong-wm-bot.onrender.com").rstrip("/")
 PORT = int(os.environ.get("PORT", "5005"))
 
 app = Flask(__name__)
@@ -66,6 +70,19 @@ pending_messages = {}
 latest_reply_tokens = {}
 timers = {}
 state_lock = threading.RLock()
+_promo_run_lock = threading.Lock()
+
+PROMO_CONSENT_TAB = "LINE_Promo_Consents"
+PROMO_CONSENT_HEADERS = [
+    "customer_key", "encrypted_line_user_id", "consented_at_utc", "opted_out_at_utc",
+    "last_sent_period", "last_sent_at_utc", "last_campaign_status"
+]
+PROMO_OFFER_TEXT = (
+    "คิดถึงกันนะคะ 😊 เดือนนี้มีสิทธิพิเศษสำหรับลูกค้า WM Design\n"
+    "เมื่อสั่งงานประเภทใดก็ได้มูลค่า 3,500 บาทขึ้นไป เลือกรับฟรี 1 รายการ\n"
+    "• ตรายาง 1 อัน หรือ\n• นามบัตร 100 ใบ\n"
+    "สนใจส่งรายละเอียดงานให้ AI ช่วยรับเรื่อง หรือให้แอดมินยืนยันราคาได้เลยค่ะ"
+)
 
 SHEET_HEADERS = [
     "timestamp_utc", "source", "customer_key", "intent", "service_category",
@@ -147,7 +164,8 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             user_chat_histories[user_id] = history[-8:]
             return reply[:4900]
         except requests.RequestException as exc:
-            app.logger.warning("Gemini request failed for %s: %s", model_id, exc)
+            status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            app.logger.warning("Gemini request failed for %s (HTTP %s)", model_id, status)
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             app.logger.warning("Gemini response parse failed: %s", exc)
     return "รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
@@ -195,7 +213,211 @@ def ensure_sheet_ready():
         values = _sheets_request("GET", values_url).json().get("values", [])
         if not values or not any(str(v).strip() for v in values[0]):
             _sheets_request("PUT", values_url, params={"valueInputOption": "RAW"}, json={"values": [SHEET_HEADERS]})
+
         _sheet_ready = True
+
+
+def _promo_range(a1):
+    tab = "'" + PROMO_CONSENT_TAB.replace("'", "''") + "'"
+    encoded = requests.utils.quote(f"{tab}!{a1}", safe="")
+    return f"https://sheets.googleapis.com/v4/spreadsheets/{GOOGLE_SHEET_ID}/values/{encoded}"
+
+
+def _ensure_promo_sheet():
+    if not PROMO_CAMPAIGN_SECRET:
+        raise RuntimeError("Promotion encryption is not configured")
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{GOOGLE_SHEET_ID}"
+    meta = _sheets_request("GET", base, params={"fields": "sheets.properties.title"}).json()
+    titles = {x.get("properties", {}).get("title") for x in meta.get("sheets", [])}
+    if PROMO_CONSENT_TAB not in titles:
+        _sheets_request("POST", f"{base}:batchUpdate", json={"requests": [
+            {"addSheet": {"properties": {"title": PROMO_CONSENT_TAB}}}
+        ]})
+    header = _sheets_request("GET", _promo_range("A1:G1")).json().get("values", [])
+    if not header:
+        _sheets_request("PUT", _promo_range("A1:G1"),
+            params={"valueInputOption": "RAW"}, json={"values": [PROMO_CONSENT_HEADERS]})
+    elif header[0] != PROMO_CONSENT_HEADERS:
+        raise RuntimeError("Promotion consent sheet schema does not match")
+
+
+def _promo_rows():
+    _ensure_promo_sheet()
+    values = _sheets_request("GET", _promo_range("A:G")).json().get("values", [])
+    return [(i, (r + [""] * 7)[:7]) for i, r in enumerate(values[1:], start=2)]
+
+
+def _save_promo_row(index, row):
+    _sheets_request("PUT", _promo_range(f"A{index}:G{index}"),
+        params={"valueInputOption": "RAW"}, json={"values": [(row + [""] * 7)[:7]]})
+
+
+def _promo_key(user_id):
+    if not CUSTOMER_ID_HASH_SALT:
+        raise RuntimeError("CUSTOMER_ID_HASH_SALT is not configured")
+    return hashlib.sha256(f"{CUSTOMER_ID_HASH_SALT}:{user_id}".encode()).hexdigest()[:20]
+
+
+def handle_promo_subscription_command(user_id, message_text):
+    command = (message_text or "").strip().casefold()
+    if command not in {"รับโปร", "สมัครโปร", "หยุดโปร", "ยกเลิกโปร"}:
+        return None
+    if not PROMO_CAMPAIGN_SECRET:
+        app.logger.warning("Promotion opt-in unavailable: missing configuration")
+        return "ระบบสมัครโปรยังไม่พร้อมค่ะ แอดมินจะตรวจสอบและช่วยดำเนินการให้นะคะ 😊"
+    try:
+        key = _promo_key(user_id)
+        rows = _promo_rows()
+        match = next(((i, r) for i, r in rows if r[0] == key), None)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if command in {"หยุดโปร", "ยกเลิกโปร"}:
+            if match:
+                i, row = match
+                row[1], row[3], row[6] = "", now, "opted_out"
+                _save_promo_row(i, row)
+            return "ยกเลิกรับโปรให้แล้วค่ะ คุณจะไม่ได้รับโปรรายเดือนทาง LINE ค่ะ"
+        encrypted = encrypt_recipient_id(user_id, PROMO_CAMPAIGN_SECRET, key)
+        if match:
+            i, row = match
+            row[1], row[2], row[3], row[6] = encrypted, now, "", "opted_in"
+            _save_promo_row(i, row)
+        else:
+            _sheets_request("POST", _promo_range("A:G") + ":append",
+                params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
+                json={"majorDimension": "ROWS", "values": [[key, encrypted, now, "", "", "", "opted_in"]]})
+        return "สมัครรับโปรรายเดือนทาง LINE ให้แล้วค่ะ พิมพ์ “หยุดโปร” ได้ทุกเมื่อหากไม่ต้องการรับอีกนะคะ 😊"
+    except Exception:
+        app.logger.exception("Promotion subscription handling failed")
+        return "สมัครรับโปรไม่สำเร็จค่ะ แอดมินจะตรวจสอบให้นะคะ 😊"
+
+
+def _latest_line_activity():
+    ensure_sheet_ready()
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{GOOGLE_SHEET_ID}/values/"
+    tab = "'" + GOOGLE_SHEET_TAB.replace("'", "''") + "'"
+    encoded = requests.utils.quote(f"{tab}!A:C", safe="")
+    rows = _sheets_request("GET", url + encoded).json().get("values", [])
+    latest = {}
+    for row in rows[1:]:
+        if len(row) < 3 or row[1] != "LINE Official Account" or not row[2]:
+            continue
+        try:
+            dt = datetime.fromisoformat(row[0].replace("Z", "+00:00"))
+            dt = dt.replace(tzinfo=dt.tzinfo or timezone.utc).astimezone(timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if row[2] not in latest or dt > latest[row[2]]:
+            latest[row[2]] = dt
+    return latest
+
+
+def _eligible_promo_rows(now):
+    activity = _latest_line_activity()
+    cutoff = now - timedelta(days=30)
+    eligible = []
+    for index, row in _promo_rows():
+        key, encrypted, consent, optout, sent_period, sent_at, status = row
+        if not key or not encrypted or optout or status == "opted_out":
+            continue
+        last_activity = activity.get(key)
+        if not last_activity or last_activity > cutoff:
+            continue
+        if sent_period == now.strftime("%Y-%m") or status == "pending":
+            continue
+        if sent_at:
+            try:
+                last_sent = datetime.fromisoformat(sent_at.replace("Z", "+00:00"))
+                last_sent = last_sent.replace(tzinfo=last_sent.tzinfo or timezone.utc).astimezone(timezone.utc)
+                if last_sent >= last_activity:
+                    continue
+            except (ValueError, TypeError):
+                continue
+        try:
+            recipient = decrypt_recipient_id(encrypted, PROMO_CAMPAIGN_SECRET, key)
+        except Exception:
+            app.logger.warning("Skipped invalid encrypted promo recipient mapping")
+            continue
+        eligible.append((index, row, recipient))
+    return eligible
+
+
+def _line_free_remaining():
+    headers = {"Authorization": f"Bearer {LINE_ACCESS_TOKEN}"}
+    quota = requests.get("https://api.line.me/v2/bot/message/quota", headers=headers, timeout=15)
+    quota.raise_for_status()
+    used = requests.get("https://api.line.me/v2/bot/message/quota/consumption",
+                        headers=headers, timeout=15)
+    used.raise_for_status()
+    return max(0, min(300, int(quota.json().get("value", 0))) -
+               int(used.json().get("totalUsage", 0)))
+
+
+def run_monthly_line_promo(execute=False):
+    # Render currently runs one web service instance. This process lock prevents
+    # overlapping cron/manual requests from sending the same cohort twice.
+    if not execute:
+        return _run_monthly_line_promo(execute=False)
+    if not _promo_run_lock.acquire(blocking=False):
+        return {"status": "already_running", "sent_count": 0, "skipped_count": 0}
+    try:
+        return _run_monthly_line_promo(execute=True)
+    finally:
+        _promo_run_lock.release()
+
+
+def _run_monthly_line_promo(execute=False):
+    now = datetime.now(timezone.utc)
+    period = now.strftime("%Y-%m")
+    candidates = _eligible_promo_rows(now)
+    image_url = f"{PUBLIC_BASE_URL}/promo-image/{period}.png"
+    result = {"period": period, "eligible_count": len(candidates), "sent_count": 0,
+              "skipped_count": 0, "image_url": image_url,
+              "status": "preview" if not execute else "not_started"}
+    if not execute:
+        return result
+    if not candidates:
+        result["status"] = "no_eligible_recipients"
+        return result
+    if not LINE_ACCESS_TOKEN:
+        result["status"] = "line_not_configured"
+        return result
+    try:
+        remaining = _line_free_remaining()
+    except requests.RequestException:
+        app.logger.exception("LINE free quota check failed; promotion skipped")
+        result["status"] = "quota_check_failed"
+        return result
+    result["free_quota_remaining"] = remaining
+    if remaining < len(candidates):
+        result["status"], result["skipped_count"] = "insufficient_free_quota", len(candidates)
+        return result
+
+    headers = {"Authorization": f"Bearer {LINE_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    for index, row, recipient in candidates:
+        row[4], row[6] = period, "pending"
+        _save_promo_row(index, row)
+        response = None
+        try:
+            response = requests.post(
+                "https://api.line.me/v2/bot/message/push", headers=headers,
+                json={"to": recipient, "messages": [
+                    {"type": "image", "originalContentUrl": image_url, "previewImageUrl": image_url},
+                    {"type": "text", "text": PROMO_OFFER_TEXT}
+                ]}, timeout=20)
+            response.raise_for_status()
+            row[5], row[6] = now.isoformat(timespec="seconds"), "sent"
+            _save_promo_row(index, row)
+            result["sent_count"] += 1
+        except requests.RequestException:
+            app.logger.warning("LINE promotion send failed with HTTP status %s",
+                               getattr(response, "status_code", "unknown"))
+            row[6] = "failed"
+            _save_promo_row(index, row)
+            result["skipped_count"] += 1
+    result["status"] = "completed"
+    app.logger.info("LINE monthly promo completed: period=%s sent=%d skipped=%d",
+                    period, result["sent_count"], result["skipped_count"])
+    return result
 
 
 def classify_customer_event(text):
@@ -291,7 +513,9 @@ def process_and_send_reply(user_id):
     image_data = next((m.get("img") for m in messages if m.get("img")), None)
     if not combined_msg and image_data:
         combined_msg = "[คุณลูกค้าส่งรูปภาพตัวอย่างงานเข้ามา]"
-    reply_text = ask_wm_design_multimodal(user_id, combined_msg, image_data)
+    reply_text = handle_promo_subscription_command(user_id, combined_msg)
+    if reply_text is None:
+        reply_text = ask_wm_design_multimodal(user_id, combined_msg, image_data)
 
     if not LINE_ACCESS_TOKEN:
         app.logger.error("LINE_ACCESS_TOKEN is not configured")
@@ -344,6 +568,7 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
     if not FACEBOOK_PAGE_ACCESS_TOKEN:
         app.logger.error("FACEBOOK_PAGE_ACCESS_TOKEN is not configured")
         return False
+    response = None
     try:
         response = requests.post(
             "https://graph.facebook.com/v22.0/me/messages",
@@ -357,8 +582,9 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
         )
         response.raise_for_status()
         return True
-    except requests.RequestException:
-        app.logger.exception("Facebook Messenger reply failed")
+    except requests.RequestException as exc:
+        status = getattr(response, "status_code", getattr(getattr(exc, "response", None), "status_code", "unknown"))
+        app.logger.warning("Facebook Messenger reply failed (HTTP %s)", status)
         return False
 
 
@@ -417,6 +643,34 @@ def facebook_webhook_receive():
                     daemon=True
                 ).start()
     return "OK", 200
+
+
+@app.get("/promo-image/<month_key>.png")
+def monthly_promo_image(month_key):
+    try:
+        datetime.strptime(month_key, "%Y-%m")
+    except ValueError:
+        return "Not found", 404
+    return send_file(io.BytesIO(build_monthly_artwork_png(month_key)),
+                     mimetype="image/png", download_name=f"wm-design-promo-{month_key}.png",
+                     max_age=60 * 60 * 24 * 31)
+
+
+@app.post("/promo/monthly")
+def monthly_promo_campaign():
+    if not PROMO_CAMPAIGN_SECRET:
+        app.logger.error("Monthly promotion endpoint is not configured")
+        return {"error": "Campaign is not configured"}, 503
+    authorization = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(authorization, f"Bearer {PROMO_CAMPAIGN_SECRET}"):
+        app.logger.warning("Rejected unauthorized monthly promotion request")
+        return {"error": "Unauthorized"}, 401
+    body = request.get_json(silent=True) or {}
+    try:
+        return run_monthly_line_promo(execute=body.get("execute") is True), 200
+    except Exception:
+        app.logger.exception("Monthly promotion run failed")
+        return {"error": "Campaign failed"}, 500
 
 
 @app.get("/")
