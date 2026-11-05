@@ -70,6 +70,7 @@ pending_messages = {}
 latest_reply_tokens = {}
 timers = {}
 state_lock = threading.RLock()
+_promo_run_lock = threading.Lock()
 
 PROMO_CONSENT_TAB = "LINE_Promo_Consents"
 PROMO_CONSENT_HEADERS = [
@@ -163,7 +164,8 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             user_chat_histories[user_id] = history[-8:]
             return reply[:4900]
         except requests.RequestException as exc:
-            app.logger.warning("Gemini request failed for %s: %s", model_id, exc)
+            status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+            app.logger.warning("Gemini request failed for %s (HTTP %s)", model_id, status)
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             app.logger.warning("Gemini response parse failed: %s", exc)
     return "รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
@@ -351,6 +353,19 @@ def _line_free_remaining():
 
 
 def run_monthly_line_promo(execute=False):
+    # Render currently runs one web service instance. This process lock prevents
+    # overlapping cron/manual requests from sending the same cohort twice.
+    if not execute:
+        return _run_monthly_line_promo(execute=False)
+    if not _promo_run_lock.acquire(blocking=False):
+        return {"status": "already_running", "sent_count": 0, "skipped_count": 0}
+    try:
+        return _run_monthly_line_promo(execute=True)
+    finally:
+        _promo_run_lock.release()
+
+
+def _run_monthly_line_promo(execute=False):
     now = datetime.now(timezone.utc)
     period = now.strftime("%Y-%m")
     candidates = _eligible_promo_rows(now)
@@ -553,6 +568,7 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
     if not FACEBOOK_PAGE_ACCESS_TOKEN:
         app.logger.error("FACEBOOK_PAGE_ACCESS_TOKEN is not configured")
         return False
+    response = None
     try:
         response = requests.post(
             "https://graph.facebook.com/v22.0/me/messages",
@@ -566,8 +582,9 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
         )
         response.raise_for_status()
         return True
-    except requests.RequestException:
-        app.logger.exception("Facebook Messenger reply failed")
+    except requests.RequestException as exc:
+        status = getattr(response, "status_code", getattr(getattr(exc, "response", None), "status_code", "unknown"))
+        app.logger.warning("Facebook Messenger reply failed (HTTP %s)", status)
         return False
 
 
