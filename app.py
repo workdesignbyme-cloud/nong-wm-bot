@@ -65,6 +65,30 @@ latest_reply_tokens = {}
 timers = {}
 state_lock = threading.RLock()
 
+# Best-effort in-memory idempotency for webhook retries. Entries expire and are
+# bounded so a long-running free-tier process cannot grow without limit.
+_processed_line_events = {}
+_processed_facebook_messages = {}
+_lead_stage_by_customer = {}
+
+def _remember_once(cache, event_id, ttl_seconds=600, max_entries=10000):
+    """Return False for a recently seen event ID; keep the cache bounded."""
+    if not event_id:
+        return True
+    now = time.monotonic()
+    key = str(event_id)
+    with state_lock:
+        expired = [item for item, seen_at in cache.items() if now - seen_at >= ttl_seconds]
+        for item in expired:
+            cache.pop(item, None)
+        if key in cache:
+            return False
+        while len(cache) >= max_entries:
+            cache.pop(next(iter(cache)))
+        cache[key] = now
+        return True
+
+
 SHEET_HEADERS = [
     "timestamp_utc", "source", "customer_key", "intent", "service_category",
     "lead_stage", "message_type", "image_received", "customer_message_summary",
@@ -145,7 +169,12 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             user_chat_histories[user_id] = history[-8:]
             return reply[:4900]
         except requests.RequestException as exc:
-            app.logger.warning("Gemini request failed for %s: %s", model_id, exc)
+            # The exception may contain the request URL, including the API key.
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            app.logger.warning(
+                "Gemini request failed (model=%s, status=%s, error_type=%s)",
+                model_id, status_code, type(exc).__name__
+            )
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             app.logger.warning("Gemini response parse failed: %s", exc)
     return "รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
@@ -196,23 +225,41 @@ def ensure_sheet_ready():
         _sheet_ready = True
 
 
-def classify_customer_event(text):
+LEAD_STAGE_RANK = {
+    "new_inquiry": 0,
+    "consideration": 1,
+    "quotation_requested": 2,
+    "high_intent": 3,
+    "payment_stage": 4,
+}
+
+
+def classify_customer_event(text, customer_key=None):
     normalized = (text or "").lower()
     category = "other_or_uncategorized"
     for name, keywords in CATEGORY_KEYWORDS.items():
         if any(word.lower() in normalized for word in keywords):
             category = name
             break
-    if any(w in normalized for w in ["ราคา", "เท่าไหร่", "ค่าใช้จ่าย", "ประเมินราคา", "quotation", "quote"]):
-        intent, stage = "price_inquiry", "quotation_requested"
-    elif any(w in normalized for w in ["ผลงาน", "ตัวอย่าง", "portfolio", "รูปป้าย", "ดูงาน"]):
-        intent, stage = "portfolio_request", "consideration"
-    elif any(w in normalized for w in ["โอน", "บัญชี", "ชำระ", "มัดจำ", "จ่ายเงิน"]):
+    if any(w in normalized for w in ["โอน", "บัญชี", "ชำระ", "มัดจำ", "จ่ายเงิน"]):
         intent, stage = "payment_inquiry", "payment_stage"
     elif any(w in normalized for w in ["สั่งทำ", "ตกลง", "เริ่มงาน", "ยืนยันงาน", "จองคิว"]):
         intent, stage = "order_intent", "high_intent"
+    elif any(w in normalized for w in ["ราคา", "เท่าไหร่", "ค่าใช้จ่าย", "ประเมินราคา", "quotation", "quote"]):
+        intent, stage = "price_inquiry", "quotation_requested"
+    elif any(w in normalized for w in ["ผลงาน", "ตัวอย่าง", "portfolio", "รูปป้าย", "ดูงาน"]):
+        intent, stage = "portfolio_request", "consideration"
     else:
         intent, stage = "general_inquiry", "new_inquiry"
+
+    # Keep event rows useful as a sales timeline: generic later messages do not
+    # move a known lead backwards. This state resets with the Render process.
+    if customer_key:
+        with state_lock:
+            previous = _lead_stage_by_customer.get(customer_key)
+            if LEAD_STAGE_RANK.get(previous, -1) > LEAD_STAGE_RANK[stage]:
+                stage = previous
+            _lead_stage_by_customer[customer_key] = stage
     return intent, category, stage
 
 
@@ -221,10 +268,10 @@ def log_customer_event(line_user_id, customer_text, ai_reply, image_received=Fal
     if not CUSTOMER_ID_HASH_SALT:
         raise RuntimeError("CUSTOMER_ID_HASH_SALT is not configured")
     ensure_sheet_ready()
-    intent, category, stage = classify_customer_event(customer_text)
     customer_key = hashlib.sha256(
         f"{CUSTOMER_ID_HASH_SALT}:{line_user_id}".encode("utf-8")
     ).hexdigest()[:20]
+    intent, category, stage = classify_customer_event(customer_text, customer_key)
     row = [[
         datetime.now(timezone.utc).isoformat(timespec="seconds"),
         source, customer_key, intent, category, stage,
@@ -324,8 +371,13 @@ def _download_line_image(message_id):
         )
         response.raise_for_status()
         return base64.b64encode(response.content).decode("ascii")
-    except requests.RequestException:
-        app.logger.exception("Could not download LINE image")
+    except requests.RequestException as exc:
+        # Avoid logging the URL, which contains the customer's LINE message ID.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        app.logger.warning(
+            "Could not download LINE image (status=%s, error_type=%s)",
+            status_code, type(exc).__name__
+        )
         return None
 
 
@@ -345,7 +397,7 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
     try:
         response = requests.post(
             "https://graph.facebook.com/v22.0/me/messages",
-            params={"access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            headers={"Authorization": f"Bearer {FACEBOOK_PAGE_ACCESS_TOKEN}"},
             json={
                 "recipient": {"id": recipient_id},
                 "messaging_type": "RESPONSE",
@@ -355,8 +407,13 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
         )
         response.raise_for_status()
         return True
-    except requests.RequestException:
-        app.logger.exception("Facebook Messenger reply failed")
+    except requests.RequestException as exc:
+        # Never log the exception text: it can include a URL with credentials.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        app.logger.warning(
+            "Facebook Messenger reply failed (status=%s, error_type=%s)",
+            status_code, type(exc).__name__
+        )
         return False
 
 
@@ -408,7 +465,11 @@ def facebook_webhook_receive():
             sender_id = (event.get("sender") or {}).get("id")
             message = event.get("message") or {}
             message_text = message.get("text", "").strip()
+            message_id = message.get("mid")
             if sender_id and message_text:
+                if message_id and not _remember_once(_processed_facebook_messages, message_id):
+                    app.logger.info("Ignored duplicate Facebook webhook message")
+                    continue
                 threading.Thread(
                     target=process_facebook_message,
                     args=(sender_id, message_text),
@@ -442,6 +503,10 @@ def callback():
         user_id = source.get("userId")
         reply_token = event.get("replyToken")
         if not user_id or not reply_token:
+            continue
+        event_id = event.get("webhookEventId") or message.get("id")
+        if event_id and not _remember_once(_processed_line_events, event_id):
+            app.logger.info("Ignored duplicate LINE webhook event")
             continue
         message_type = message.get("type")
         text = ""
