@@ -359,7 +359,27 @@ def callback():
             text = "[ลูกค้าส่งรูปภาพ]"
             image_b64 = _download_line_image(message.get("id", ""))
         elif message_type == "text":
-            text = message.get("text", "")
+            text = message.get("text", "")          
+            if text.strip().upper() == "ADMIN WM":
+                try:
+                    requests.post(
+                        "https://api.line.me/v2/bot/message/reply",
+                        headers={
+                            "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "replyToken": reply_token,
+                            "messages": [{
+                                "type": "text",
+                                "text": f"ADMIN_LINE_USER_ID={user_id}"
+                            }]
+                        },
+                        timeout=15
+                    ).raise_for_status()
+                except requests.RequestException:
+                    app.logger.exception("Could not return admin LINE ID")
+                continue
         else:
             continue
 
