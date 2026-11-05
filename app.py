@@ -22,6 +22,7 @@ GOOGLE_SHEET_ID = os.environ.get("GOOGLE_SHEET_ID", "10qPeBEzVye8cc5o9j6YMD9AEai
 GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "LINE_Leads").strip() or "LINE_Leads"
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 CUSTOMER_ID_HASH_SALT = os.environ.get("CUSTOMER_ID_HASH_SALT", "").strip()
+ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "")
 PORT = int(os.environ.get("PORT", "5005"))
 
 app = Flask(__name__)
