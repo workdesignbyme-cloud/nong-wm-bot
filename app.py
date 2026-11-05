@@ -23,6 +23,9 @@ GOOGLE_SHEET_TAB = os.environ.get("GOOGLE_SHEET_TAB", "LINE_Leads").strip() or "
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 CUSTOMER_ID_HASH_SALT = os.environ.get("CUSTOMER_ID_HASH_SALT", "").strip()
 ADMIN_LINE_USER_ID = os.environ.get("ADMIN_LINE_USER_ID", "")
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "").strip()
+META_APP_SECRET = os.environ.get("META_APP_SECRET", "").strip()
+FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip()
 PORT = int(os.environ.get("PORT", "5005"))
 
 app = Flask(__name__)
@@ -213,7 +216,7 @@ def classify_customer_event(text):
     return intent, category, stage
 
 
-def log_customer_event(line_user_id, customer_text, ai_reply, image_received=False):
+def log_customer_event(line_user_id, customer_text, ai_reply, image_received=False, source="LINE Official Account"):
     """Log only derived labels and a pseudonymous key, never raw messages or payment details."""
     if not CUSTOMER_ID_HASH_SALT:
         raise RuntimeError("CUSTOMER_ID_HASH_SALT is not configured")
@@ -224,7 +227,7 @@ def log_customer_event(line_user_id, customer_text, ai_reply, image_received=Fal
     ).hexdigest()[:20]
     row = [[
         datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "LINE Official Account", customer_key, intent, category, stage,
+        source, customer_key, intent, category, stage,
         "image" if image_received else "text", bool(image_received),
         f"Structured event only: {intent} / {category}", bool(ai_reply),
         intent == "portfolio_request"
@@ -265,9 +268,9 @@ def notify_admin_new_lead():
     except requests.RequestException:
         app.logger.exception("Admin LINE notification failed")
 
-def _log_event_async(user_id, customer_text, reply_text, image_received):
+def _log_event_async(user_id, customer_text, reply_text, image_received, source="LINE Official Account"):
     try:
-        log_customer_event(user_id, customer_text, reply_text, image_received)
+        log_customer_event(user_id, customer_text, reply_text, image_received, source=source)
     except Exception:
         app.logger.exception("Could not write LINE lead event")
 
@@ -306,7 +309,7 @@ def process_and_send_reply(user_id):
     if sent:
         threading.Thread(
             target=_log_event_async,
-            args=(user_id, combined_msg, reply_text, bool(image_data)),
+            args=(user_id, combined_msg, reply_text, bool(image_data), "LINE Official Account"),
             daemon=True,
         ).start()
 
@@ -324,6 +327,94 @@ def _download_line_image(message_id):
     except requests.RequestException:
         app.logger.exception("Could not download LINE image")
         return None
+
+
+def verify_meta_signature(raw_body: bytes, signature_header: str) -> bool:
+    if not META_APP_SECRET or not signature_header or not signature_header.startswith("sha256="):
+        return False
+    expected = hmac.new(
+        META_APP_SECRET.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest("sha256=" + expected, signature_header)
+
+
+def send_facebook_message(recipient_id: str, text: str) -> bool:
+    if not FACEBOOK_PAGE_ACCESS_TOKEN:
+        app.logger.error("FACEBOOK_PAGE_ACCESS_TOKEN is not configured")
+        return False
+    try:
+        response = requests.post(
+            "https://graph.facebook.com/v22.0/me/messages",
+            params={"access_token": FACEBOOK_PAGE_ACCESS_TOKEN},
+            json={
+                "recipient": {"id": recipient_id},
+                "messaging_type": "RESPONSE",
+                "message": {"text": (text or "")[:2000]}
+            },
+            timeout=15
+        )
+        response.raise_for_status()
+        return True
+    except requests.RequestException:
+        app.logger.exception("Facebook Messenger reply failed")
+        return False
+
+
+def process_facebook_message(sender_id: str, message_text: str):
+    if not sender_id or not message_text:
+        return
+    reply_text = ask_wm_design_multimodal("facebook:" + sender_id, message_text)
+    sent = send_facebook_message(sender_id, reply_text)
+    if sent:
+        try:
+            log_customer_event(
+                sender_id, message_text, reply_text, False,
+                source="Facebook Page"
+            )
+        except Exception:
+            app.logger.exception("Could not write Facebook lead event")
+        notify_admin_new_lead()
+
+
+@app.get("/facebook-webhook")
+def facebook_webhook_verify():
+    mode = request.args.get("hub.mode", "")
+    token = request.args.get("hub.verify_token", "")
+    challenge = request.args.get("hub.challenge", "")
+    if mode == "subscribe" and META_VERIFY_TOKEN and hmac.compare_digest(token, META_VERIFY_TOKEN):
+        return challenge, 200
+    return "Forbidden", 403
+
+
+@app.post("/facebook-webhook")
+def facebook_webhook_receive():
+    raw_body = request.get_data(cache=True)
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not verify_meta_signature(raw_body, signature):
+        app.logger.warning("Rejected Facebook webhook: invalid signature or missing META_APP_SECRET")
+        return "Unauthorized", 401
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return "Bad Request", 400
+
+    if body.get("object") != "page":
+        return "OK", 200
+
+    for entry in body.get("entry", []):
+        for event in entry.get("messaging", []):
+            if event.get("message", {}).get("is_echo"):
+                continue
+            sender_id = (event.get("sender") or {}).get("id")
+            message = event.get("message") or {}
+            message_text = message.get("text", "").strip()
+            if sender_id and message_text:
+                threading.Thread(
+                    target=process_facebook_message,
+                    args=(sender_id, message_text),
+                    daemon=True
+                ).start()
+    return "OK", 200
 
 
 @app.get("/")
