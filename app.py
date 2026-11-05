@@ -169,7 +169,12 @@ def ask_wm_design_multimodal(user_id, combined_text, image_data=None):
             user_chat_histories[user_id] = history[-8:]
             return reply[:4900]
         except requests.RequestException as exc:
-            app.logger.warning("Gemini request failed for %s: %s", model_id, exc)
+            # The exception may contain the request URL, including the API key.
+            status_code = getattr(getattr(exc, "response", None), "status_code", None)
+            app.logger.warning(
+                "Gemini request failed (model=%s, status=%s, error_type=%s)",
+                model_id, status_code, type(exc).__name__
+            )
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             app.logger.warning("Gemini response parse failed: %s", exc)
     return "รับทราบข้อมูลเรียบร้อยค่ะ เดี๋ยวแอดมินจะรีบตรวจเช็กรายละเอียดแล้วแจ้งกลับนะคะ 😊"
@@ -366,8 +371,13 @@ def _download_line_image(message_id):
         )
         response.raise_for_status()
         return base64.b64encode(response.content).decode("ascii")
-    except requests.RequestException:
-        app.logger.exception("Could not download LINE image")
+    except requests.RequestException as exc:
+        # Avoid logging the URL, which contains the customer's LINE message ID.
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        app.logger.warning(
+            "Could not download LINE image (status=%s, error_type=%s)",
+            status_code, type(exc).__name__
+        )
         return None
 
 
