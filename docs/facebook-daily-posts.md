@@ -16,7 +16,7 @@ Apps Script time triggers run near the selected minute, not at an exact second. 
 
 ## Setup
 
-1. Deploy this branch to the intended Render service for `workdesignbyme-cloud/nong-wm-bot`. Do not point the existing `wedding-bot-service` at this repository without confirming that it is the intended live service.
+1. Merge this change into `main`; the existing `nong-wm-bot` Render service is connected to this repository and auto-deploys from `main`.
 2. In that Render service, preserve all existing variables and set or verify:
    - `FACEBOOK_PAGE_ACCESS_TOKEN`: Page token with the `pages_manage_posts` permission.
    - `FACEBOOK_PAGE_ID`: optional; defaults to WM Design Page ID `163374066849979`.
@@ -42,4 +42,4 @@ TMD forecast access requires a TMD account and OAuth access token; the official 
 
 ## Rollout boundary
 
-Creating this code branch does not publish posts or create Apps Script triggers. The current Render dashboard inspected during this task shows its active `wedding-bot-service` connected to `workdesignbyme-cloud/wedding-bot-service`, so deploy the PR only after the intended service is connected to `nong-wm-bot`. This avoids changing the wrong production service.
+Creating this code branch does not publish posts or create Apps Script triggers. The current Render service is `nong-wm-bot`, connected to this repository and `main`. This update adds the endpoint, but the Apps Script code and triggers must still be added/configured in the existing WM Design CRM project before posts can start.
