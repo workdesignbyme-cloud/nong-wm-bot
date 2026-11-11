@@ -16,6 +16,7 @@ from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from promo_campaign import build_monthly_artwork_png, decrypt_recipient_id, encrypt_recipient_id
 from facebook_daily import register_facebook_daily_routes
+from task_management import TaskManager
 
 # Secrets are intentionally read ONLY from Render Environment Variables.
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "").strip()
@@ -194,6 +195,7 @@ def _sheets_request(method, url, **kwargs):
 
 
 register_facebook_daily_routes(app, _sheets_request, GOOGLE_SHEET_ID)
+task_manager = TaskManager(GOOGLE_SHEET_ID, _sheets_request)
 
 
 def ensure_sheet_ready():
@@ -468,19 +470,33 @@ def log_customer_event(line_user_id, customer_text, ai_reply, image_received=Fal
         params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
         json={"majorDimension": "ROWS", "values": row}
     )
+    try:
+        return task_manager.record_lead(source, customer_key, category, intent, stage)
+    except Exception:
+        app.logger.exception("Could not update WM task dashboard")
+        return None
 
-def notify_admin_new_lead():
+def notify_admin_new_lead(task=None):
     if not ADMIN_LINE_USER_ID or not LINE_ACCESS_TOKEN:
         app.logger.warning("Admin LINE notification is not configured")
         return
 
-    payload = {
-        "to": ADMIN_LINE_USER_ID,
-        "messages": [{
-            "type": "text",
-            "text": "🔔 WM Design\nมีลูกค้าติดต่อเข้ามาใหม่ค่ะ\nกรุณาตรวจสอบข้อมูลใน Google Sheets: LINE_Leads"
-        }]
-    }
+    if task:
+        source_label = "Facebook Page" if task.get("source") == "Facebook Page" else "LINE OA"
+        text = (
+            "🔔 WM Design · มีลูกค้าติดต่อใหม่\n"
+            f"ช่องทาง: {source_label}\n"
+            f"งานติดตาม: {task['task_id']} · {task.get('category') or 'ยังไม่จัดหมวด'}\n"
+            f"ขั้นลูกค้า: {task.get('lead_stage') or 'new_inquiry'}\n"
+            f"ดูรายการใน Google Sheets: {GOOGLE_SHEET_TAB}\n"
+            f"อัปเดตงาน: สถานะ {task['task_id']} กำลังทำ"
+        )
+    else:
+        text = (
+            "🔔 WM Design\nมีลูกค้าติดต่อเข้ามาใหม่ค่ะ\n"
+            f"กรุณาตรวจสอบข้อมูลใน Google Sheets: {GOOGLE_SHEET_TAB}"
+        )
+    payload = {"to": ADMIN_LINE_USER_ID, "messages": [{"type": "text", "text": text}]}
 
     try:
         response = requests.post(
@@ -497,12 +513,13 @@ def notify_admin_new_lead():
         app.logger.exception("Admin LINE notification failed")
 
 def _log_event_async(user_id, customer_text, reply_text, image_received, source="LINE Official Account"):
+    task = None
     try:
-        log_customer_event(user_id, customer_text, reply_text, image_received, source=source)
+        task = log_customer_event(user_id, customer_text, reply_text, image_received, source=source)
     except Exception:
         app.logger.exception("Could not write LINE lead event")
 
-    notify_admin_new_lead()
+    notify_admin_new_lead(task)
 
 def process_and_send_reply(user_id):
     # Called by a debounce timer; do not sleep again (avoids double delay).
@@ -598,14 +615,15 @@ def process_facebook_message(sender_id: str, message_text: str):
     reply_text = ask_wm_design_multimodal("facebook:" + sender_id, message_text)
     sent = send_facebook_message(sender_id, reply_text)
     if sent:
+        task = None
         try:
-            log_customer_event(
+            task = log_customer_event(
                 sender_id, message_text, reply_text, False,
                 source="Facebook Page"
             )
         except Exception:
             app.logger.exception("Could not write Facebook lead event")
-        notify_admin_new_lead()
+        notify_admin_new_lead(task)
 
 
 @app.get("/facebook-webhook")
@@ -710,7 +728,23 @@ def callback():
             text = "[ลูกค้าส่งรูปภาพ]"
             image_b64 = _download_line_image(message.get("id", ""))
         elif message_type == "text":
-            text = message.get("text", "")          
+            text = message.get("text", "")
+            if user_id == ADMIN_LINE_USER_ID and text.strip():
+                task_reply = task_manager.handle_command(text, actor="LINE admin")
+                if task_reply is not None:
+                    try:
+                        requests.post(
+                            "https://api.line.me/v2/bot/message/reply",
+                            headers={
+                                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                                "Content-Type": "application/json"
+                            },
+                            json={"replyToken": reply_token, "messages": [{"type": "text", "text": task_reply[:4900]}]},
+                            timeout=15
+                        ).raise_for_status()
+                    except requests.RequestException:
+                        app.logger.exception("LINE task command reply failed")
+                    continue
             if text.strip().upper() == "ADMIN WM":
                 try:
                     requests.post(
@@ -750,3 +784,4 @@ def callback():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
+
