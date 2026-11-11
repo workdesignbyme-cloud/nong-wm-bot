@@ -17,7 +17,8 @@ TASK_HEADERS = [
 EVENT_HEADERS = [
     "task_id", "changed_at_utc", "actor", "event_type", "old_status", "new_status",
 ]
-OPEN_STATUSES = {"รอติดต่อ", "รอดำเนินการ", "กำลังทำ", "รอข้อมูล", "ติดปัญหา"}
+STATUS_ORDER = ("รอติดต่อ", "รอดำเนินการ", "กำลังทำ", "รอข้อมูล", "ติดปัญหา", "เสร็จแล้ว")
+OPEN_STATUSES = set(STATUS_ORDER[:-1])
 STATUS_ALIASES = {
     "รอติดต่อ": "รอติดต่อ",
     "รอดำเนินการ": "รอดำเนินการ",
@@ -124,7 +125,7 @@ class TaskManager:
                     }
 
             now = self._now()
-            task_id = "LEAD-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:6].upper()
+            task_id = "LEAD-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:8].upper()
             row = [
                 task_id, now, now, source, customer_key, "ติดต่อลูกค้าใหม่",
                 category, intent, lead_stage, "รอติดต่อ", "", now,
@@ -150,7 +151,7 @@ class TaskManager:
         with self._lock:
             self._ensure()
             now = self._now()
-            task_id = "TASK-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:6].upper()
+            task_id = "TASK-" + datetime.now(timezone.utc).strftime("%Y%m%d") + "-" + uuid.uuid4().hex[:8].upper()
             row = [
                 task_id, now, now, "ADMIN", "", title, "", "", "",
                 "รอดำเนินการ", due_date, now,
@@ -162,7 +163,7 @@ class TaskManager:
     def update_status(self, task_id, status, actor="admin"):
         normalized_id = (task_id or "").strip().upper()
         status = STATUS_ALIASES.get((status or "").strip())
-        if not re.fullmatch(r"(?:LEAD|TASK)-\d{8}-[A-F0-9]{6}", normalized_id) or not status:
+        if not re.fullmatch(r"(?:LEAD|TASK)-\d{8}-[A-F0-9]{8}", normalized_id) or not status:
             raise ValueError("Invalid task id or status")
         with self._lock:
             self._ensure()
@@ -202,7 +203,7 @@ class TaskManager:
         with self._lock:
             self._ensure()
             rows = self._read(TASKS_TAB, "A:L")
-        counts = {status: 0 for status in (*OPEN_STATUSES, "เสร็จแล้ว")}
+        counts = {status: 0 for status in STATUS_ORDER}
         for raw in rows[1:]:
             row = (raw + [""] * len(TASK_HEADERS))[:len(TASK_HEADERS)]
             if row[9] in counts:
@@ -249,7 +250,7 @@ class TaskManager:
                 return f"เพิ่มงานไม่ได้ค่ะ: {exc}"
             due = f" · กำหนดส่ง {task['due_date']}" if task["due_date"] else ""
             return f"✅ เพิ่มงานแล้วค่ะ\n{task['task_id']} · {task['title']}{due}\nสถานะ: {task['status']}"
-        status_match = re.fullmatch(r"สถานะ\s+((?:LEAD|TASK)-\d{8}-[A-Fa-f0-9]{6})\s+(.+)", command, flags=re.IGNORECASE)
+        status_match = re.fullmatch(r"สถานะ\s+((?:LEAD|TASK)-\d{8}-[A-Fa-f0-9]{8})\s+(.+)", command, flags=re.IGNORECASE)
         if status_match:
             task_id, requested_status = status_match.groups()
             status = STATUS_ALIASES.get(requested_status.strip())

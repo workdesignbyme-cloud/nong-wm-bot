@@ -730,7 +730,11 @@ def callback():
         elif message_type == "text":
             text = message.get("text", "")
             if user_id == ADMIN_LINE_USER_ID and text.strip():
-                task_reply = task_manager.handle_command(text, actor="LINE admin")
+                try:
+                    task_reply = task_manager.handle_command(text, actor="LINE admin")
+                except Exception:
+                    app.logger.exception("LINE admin task command failed")
+                    task_reply = "ระบบงานขัดข้องชั่วคราวค่ะ กรุณาลองอีกครั้งภายหลัง"
                 if task_reply is not None:
                     try:
                         requests.post(

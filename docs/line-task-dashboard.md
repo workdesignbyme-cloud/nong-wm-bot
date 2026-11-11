@@ -18,7 +18,7 @@ Commands work only for the LINE user matching the existing `ADMIN_LINE_USER_ID` 
 | `งาน` | List the latest open lead and manual tasks |
 | `สรุปงาน` | Count tasks by status |
 | `เพิ่มงาน ตรวจไฟล์ป้าย | 2026-11-30` | Create a manual task with optional due date |
-| `สถานะ LEAD-YYYYMMDD-ABC123 กำลังทำ` | Update a task status |
+| `สถานะ LEAD-YYYYMMDD-ABCDEF12 กำลังทำ` | Update a task status |
 | `คำสั่งงาน` | Show the command guide |
 
 Allowed statuses: `รอติดต่อ`, `รอดำเนินการ`, `กำลังทำ`, `รอข้อมูล`, `ติดปัญหา`, and `เสร็จแล้ว`.
