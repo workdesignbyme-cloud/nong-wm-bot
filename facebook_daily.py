@@ -8,6 +8,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import requests
+from flask import request
 
 PAGE_ID = os.environ.get("FACEBOOK_PAGE_ID", "163374066849979").strip()
 GRAPH_API_VERSION = "v22.0"
@@ -60,13 +61,11 @@ def register_facebook_daily_routes(app, sheets_request, spreadsheet_id):
         if not secret:
             app.logger.error("Facebook daily publishing is not configured")
             return {"error": "Publishing is not configured"}, 503
-        authorization = app.request_class.environ.get("HTTP_AUTHORIZATION", "")
+        authorization = request.headers.get("Authorization", "")
         if not hmac.compare_digest(authorization, f"Bearer {secret}"):
             app.logger.warning("Rejected unauthorized Facebook daily post request")
             return {"error": "Unauthorized"}, 401
 
-        body = app.request_class.environ  # request body is parsed below through Flask context
-        from flask import request
         payload = request.get_json(silent=True) or {}
         slot = str(payload.get("slot", "")).strip().lower()
         post_date = str(payload.get("date", "")).strip()
