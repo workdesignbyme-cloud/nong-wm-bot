@@ -15,6 +15,7 @@ from flask import Flask, request, send_file
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from promo_campaign import build_monthly_artwork_png, decrypt_recipient_id, encrypt_recipient_id
+from facebook_daily import register_facebook_daily_routes
 
 # Secrets are intentionally read ONLY from Render Environment Variables.
 LINE_ACCESS_TOKEN = os.environ.get("LINE_ACCESS_TOKEN", "").strip()
@@ -190,6 +191,9 @@ def _sheets_request(method, url, **kwargs):
     response = requests.request(method, url, headers=headers, timeout=20, **kwargs)
     response.raise_for_status()
     return response
+
+
+register_facebook_daily_routes(app, _sheets_request, GOOGLE_SHEET_ID)
 
 
 def ensure_sheet_ready():
