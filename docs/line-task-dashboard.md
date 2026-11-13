@@ -4,9 +4,9 @@ This change adds a lightweight task board to the existing CRM spreadsheet and LI
 
 ## What happens automatically
 
-- After a LINE OA or Facebook Page message is handled and logged to the existing CRM tab, the bot upserts one open task per pseudonymous customer key and channel.
+- After a LINE OA or Facebook Page/Instagram contact is logged to the existing CRM tab, the bot upserts one open task per pseudonymous customer key and channel.
 - A repeat message updates that task's activity, category, intent, and lead stage rather than creating a second open task.
-- The LINE admin receives a push notification with the task ID, source channel, service category, and lead stage. It does not include the customer's raw message, name, or platform ID.
+- The LINE admin receives a privacy-safe alert with source channel and interaction type for LINE messages/images, Facebook Messenger messages/attachments, Facebook Page comments, and Instagram Direct/comments/mentions when subscribed in Meta. It does not include the customer's raw message, name, or platform ID. The alert is sent before CRM logging so a Sheets delay does not hold up the notification.
 - Tasks and status-change history are stored in new `WM_Tasks` and `WM_Task_Events` tabs. Existing CRM and promotion tabs are left intact.
 
 ## Admin commands in LINE
@@ -29,7 +29,7 @@ Allowed statuses: `รอติดต่อ`, `รอดำเนินการ
 - Status changes are written to a separate append-only event tab for later review.
 - Task commands are handled only for the configured LINE admin. Other users continue through the existing customer-chat flow.
 - Google Sheets API failures are logged without credentials or raw customer messages; they do not change existing CRM rows.
-- The board currently offers immediate new-lead notifications and manual status tracking. Due dates are recorded and shown in the board; automatic due-date reminders are a separate follow-up.
+- The board offers lead follow-up and manual status tracking. Due dates are recorded and shown in the board; automatic due-date reminders are a separate follow-up. LINE push alerts are sent only when the free monthly quota has remaining capacity; if quota is unavailable, check the channel inbox and CRM.
 - If `ADMIN_LINE_USER_ID` is unset, the existing admin push feature cannot deliver notifications. Preserve all existing Render variables and verify that this one is configured before enabling the feature.
 
 ## Rollout
