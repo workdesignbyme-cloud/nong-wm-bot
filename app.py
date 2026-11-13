@@ -66,6 +66,11 @@ SYSTEM_PROMPT = f"""คุณคือระบบ AI อัตโนมัต�
 """
 
 # In-memory chat state: suitable for a single Render instance. It resets on restart.
+# Cache webhook event ids to suppress platform retries without adding a paid store.
+CONTACT_EVENT_TTL_SECONDS = 24 * 60 * 60
+CONTACT_EVENT_CACHE_LIMIT = 10000
+_contact_event_cache = {}
+_contact_event_lock = threading.Lock()
 user_chat_histories = defaultdict(list)
 user_last_greeting_date = {}
 pending_messages = {}
@@ -476,50 +481,69 @@ def log_customer_event(line_user_id, customer_text, ai_reply, image_received=Fal
         app.logger.exception("Could not update WM task dashboard")
         return None
 
-def notify_admin_new_lead(task=None):
+def _claim_contact_event(event_key):
+    """Return False for a recently processed webhook delivery; cache is bounded and process-local."""
+    if not event_key:
+        return True
+    now = time.monotonic()
+    with _contact_event_lock:
+        for key, created in list(_contact_event_cache.items()):
+            if now - created > CONTACT_EVENT_TTL_SECONDS:
+                _contact_event_cache.pop(key, None)
+        if event_key in _contact_event_cache:
+            return False
+        if len(_contact_event_cache) >= CONTACT_EVENT_CACHE_LIMIT:
+            oldest = min(_contact_event_cache, key=_contact_event_cache.get)
+            _contact_event_cache.pop(oldest, None)
+        _contact_event_cache[event_key] = now
+        return True
+
+
+def notify_admin_contact(source, interaction, event_key, already_claimed=False):
+    """Send a privacy-safe LINE alert only while free monthly push quota remains."""
+    if not already_claimed and not _claim_contact_event(event_key):
+        return False
     if not ADMIN_LINE_USER_ID or not LINE_ACCESS_TOKEN:
-        app.logger.warning("Admin LINE notification is not configured")
-        return
+        app.logger.warning("Admin LINE contact alert is not configured")
+        return False
+    try:
+        remaining = _line_free_remaining()
+    except requests.RequestException:
+        app.logger.warning("LINE quota check failed; contact alert skipped")
+        return False
+    if remaining <= 0:
+        app.logger.warning("LINE free push quota exhausted; contact alert skipped")
+        return False
 
-    if task:
-        source_label = "Facebook Page" if task.get("source") == "Facebook Page" else "LINE OA"
-        text = (
-            "🔔 WM Design · มีลูกค้าติดต่อใหม่\n"
-            f"ช่องทาง: {source_label}\n"
-            f"งานติดตาม: {task['task_id']} · {task.get('category') or 'ยังไม่จัดหมวด'}\n"
-            f"ขั้นลูกค้า: {task.get('lead_stage') or 'new_inquiry'}\n"
-            f"ดูรายการใน Google Sheets: {GOOGLE_SHEET_TAB}\n"
-            f"อัปเดตงาน: สถานะ {task['task_id']} กำลังทำ"
-        )
-    else:
-        text = (
-            "🔔 WM Design\nมีลูกค้าติดต่อเข้ามาใหม่ค่ะ\n"
-            f"กรุณาตรวจสอบข้อมูลใน Google Sheets: {GOOGLE_SHEET_TAB}"
-        )
-    payload = {"to": ADMIN_LINE_USER_ID, "messages": [{"type": "text", "text": text}]}
-
+    message = (
+        "🔔 WM Design — มีผู้ติดต่อใหม่\n"
+        f"ช่องทาง: {source}\n"
+        f"รายการ: {interaction}\n"
+        "กรุณาตรวจสอบกล่องข้อความ/คอมเมนต์ใน LINE OA หรือ Meta Business Suite"
+    )
     try:
         response = requests.post(
             "https://api.line.me/v2/bot/message/push",
-            headers={
-                "Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            },
-            json=payload,
+            headers={"Authorization": f"Bearer {LINE_ACCESS_TOKEN}",
+                     "Content-Type": "application/json"},
+            json={"to": ADMIN_LINE_USER_ID, "messages": [{"type": "text", "text": message}]},
             timeout=15
         )
         response.raise_for_status()
-    except requests.RequestException:
-        app.logger.exception("Admin LINE notification failed")
+        app.logger.info("Admin contact alert sent: source=%s type=%s", source, interaction)
+        return True
+    except requests.RequestException as exc:
+        status = getattr(getattr(exc, "response", None), "status_code", "unknown")
+        app.logger.warning("Admin LINE contact alert failed (HTTP %s)", status)
+        return False
+
 
 def _log_event_async(user_id, customer_text, reply_text, image_received, source="LINE Official Account"):
-    task = None
     try:
-        task = log_customer_event(user_id, customer_text, reply_text, image_received, source=source)
+        log_customer_event(user_id, customer_text, reply_text, image_received, source=source)
     except Exception:
         app.logger.exception("Could not write LINE lead event")
 
-    notify_admin_new_lead(task)
 
 def process_and_send_reply(user_id):
     # Called by a debounce timer; do not sleep again (avoids double delay).
@@ -609,21 +633,46 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
         return False
 
 
-def process_facebook_message(sender_id: str, message_text: str):
-    if not sender_id or not message_text:
+def _process_meta_comment(source, interaction, dedupe_key, customer_ref, comment_text=""):
+    if not _claim_contact_event(dedupe_key):
         return
-    reply_text = ask_wm_design_multimodal("facebook:" + sender_id, message_text)
-    sent = send_facebook_message(sender_id, reply_text)
-    if sent:
-        task = None
+    notify_admin_contact(source, interaction, dedupe_key, already_claimed=True)
+    if customer_ref and comment_text:
         try:
-            task = log_customer_event(
-                sender_id, message_text, reply_text, False,
-                source="Facebook Page"
-            )
+            log_customer_event(customer_ref, comment_text, "", False, source=source)
         except Exception:
-            app.logger.exception("Could not write Facebook lead event")
-        notify_admin_new_lead(task)
+            app.logger.exception("Could not write %s CRM event", source)
+
+
+def process_facebook_message(sender_id: str, message_text: str, event_id: str = ""):
+    if not sender_id:
+        return
+    dedupe_key = f"facebook-messenger:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
+    if not _claim_contact_event(dedupe_key):
+        return
+    notify_admin_contact("Facebook Messenger", "ข้อความใหม่", dedupe_key, already_claimed=True)
+    try:
+        log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
+                           source="Facebook Messenger")
+    except Exception:
+        app.logger.exception("Could not write Facebook Messenger CRM event")
+
+    if message_text and not message_text.startswith("[ลูกค้าส่งไฟล์แนบ]"):
+        reply_text = ask_wm_design_multimodal("facebook:" + sender_id, message_text)
+        if not send_facebook_message(sender_id, reply_text):
+            app.logger.warning("Facebook Messenger reply was not sent")
+
+
+def _process_instagram_message(sender_id, message_text, event_id):
+    dedupe_key = f"instagram-message:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
+    if not _claim_contact_event(dedupe_key):
+        return
+    notify_admin_contact("Instagram Direct", "ข้อความใหม่", dedupe_key, already_claimed=True)
+    try:
+        log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
+                           source="Instagram Direct")
+    except Exception:
+        app.logger.exception("Could not write Instagram Direct CRM event")
 
 
 @app.get("/facebook-webhook")
@@ -641,28 +690,60 @@ def facebook_webhook_receive():
     raw_body = request.get_data(cache=True)
     signature = request.headers.get("X-Hub-Signature-256", "")
     if not verify_meta_signature(raw_body, signature):
-        app.logger.warning("Rejected Facebook webhook: invalid signature or missing META_APP_SECRET")
+        app.logger.warning("Rejected Meta webhook: invalid signature or missing META_APP_SECRET")
         return "Unauthorized", 401
     try:
         body = json.loads(raw_body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return "Bad Request", 400
 
-    if body.get("object") != "page":
+    channel = body.get("object")
+    if channel not in {"page", "instagram"}:
         return "OK", 200
 
     for entry in body.get("entry", []):
+        entry_id = str(entry.get("id", ""))
         for event in entry.get("messaging", []):
             if event.get("message", {}).get("is_echo"):
                 continue
-            sender_id = (event.get("sender") or {}).get("id")
+            sender_id = str((event.get("sender") or {}).get("id", ""))
             message = event.get("message") or {}
-            message_text = message.get("text", "").strip()
-            if sender_id and message_text:
+            if not sender_id or not message:
+                continue
+            message_text = (message.get("text") or "").strip()
+            if not message_text and message.get("attachments"):
+                message_text = "[ลูกค้าส่งไฟล์แนบ]"
+            event_id = str(message.get("mid") or event.get("timestamp") or "")
+            target = process_facebook_message if channel == "page" else _process_instagram_message
+            threading.Thread(target=target, args=(sender_id, message_text, event_id), daemon=True).start()
+
+        for change in entry.get("changes", []):
+            field = change.get("field", "")
+            value = change.get("value") or {}
+            if channel == "page" and field == "feed":
+                if value.get("item") != "comment" or value.get("verb") not in {"add", "edited"}:
+                    continue
+                author_id = str((value.get("from") or {}).get("id", ""))
+                if author_id and author_id == entry_id:
+                    continue
+                comment_id = str(value.get("comment_id") or value.get("id") or "")
+                if not comment_id:
+                    comment_id = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
                 threading.Thread(
-                    target=process_facebook_message,
-                    args=(sender_id, message_text),
-                    daemon=True
+                    target=_process_meta_comment,
+                    args=("Facebook Page comment", "คอมเมนต์ใหม่",
+                          f"facebook-comment:{entry_id}:{comment_id}", comment_id,
+                          value.get("message", "")), daemon=True
+                ).start()
+            elif channel == "instagram" and field in {"comments", "live_comments", "mentions"}:
+                comment_id = str(value.get("comment_id") or value.get("id") or "")
+                if not comment_id:
+                    comment_id = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                kind = "การกล่าวถึง/คอมเมนต์ใหม่" if field == "mentions" else "คอมเมนต์ใหม่"
+                threading.Thread(
+                    target=_process_meta_comment,
+                    args=("Instagram", kind, f"instagram-{field}:{entry_id}:{comment_id}",
+                          comment_id, value.get("text") or value.get("message", "")), daemon=True
                 ).start()
     return "OK", 200
 
@@ -771,6 +852,17 @@ def callback():
                 continue
         else:
             continue
+
+        event_id = str(event.get("webhookEventId") or
+                       f"{user_id}:{event.get('timestamp', '')}:{message.get('id', '')}")
+        contact_event_key = f"line:{event_id}"
+        if not _claim_contact_event(contact_event_key):
+            continue
+        threading.Thread(
+            target=notify_admin_contact,
+            args=("LINE Official Account", "ข้อความ/รูปใหม่", contact_event_key, True),
+            daemon=True
+        ).start()
 
         with state_lock:
             pending_messages.setdefault(user_id, []).append({"text": text, "img": image_b64})
