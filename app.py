@@ -729,10 +729,11 @@ def facebook_webhook_receive():
                 comment_id = str(value.get("comment_id") or value.get("id") or "")
                 if not comment_id:
                     comment_id = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+                customer_ref = author_id or comment_id
                 threading.Thread(
                     target=_process_meta_comment,
                     args=("Facebook Page comment", "คอมเมนต์ใหม่",
-                          f"facebook-comment:{entry_id}:{comment_id}", comment_id,
+                          f"facebook-comment:{entry_id}:{comment_id}", customer_ref,
                           value.get("message", "")), daemon=True
                 ).start()
             elif channel == "instagram" and field in {"comments", "live_comments", "mentions"}:
@@ -740,10 +741,12 @@ def facebook_webhook_receive():
                 if not comment_id:
                     comment_id = hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
                 kind = "การกล่าวถึง/คอมเมนต์ใหม่" if field == "mentions" else "คอมเมนต์ใหม่"
+                author_id = str((value.get("from") or {}).get("id") or value.get("user_id") or "")
+                customer_ref = author_id or comment_id
                 threading.Thread(
                     target=_process_meta_comment,
                     args=("Instagram", kind, f"instagram-{field}:{entry_id}:{comment_id}",
-                          comment_id, value.get("text") or value.get("message", "")), daemon=True
+                          customer_ref, value.get("text") or value.get("message", "")), daemon=True
                 ).start()
     return "OK", 200
 
