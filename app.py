@@ -637,12 +637,12 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
 def _process_meta_comment(source, interaction, dedupe_key, customer_ref, comment_text=""):
     if not _claim_contact_event(dedupe_key):
         return
+    notify_admin_contact(source, interaction, dedupe_key, already_claimed=True)
     if customer_ref and comment_text:
         try:
             log_customer_event(customer_ref, comment_text, "", False, source=source)
         except Exception:
             app.logger.exception("Could not write %s CRM event", source)
-    notify_admin_contact(source, interaction, dedupe_key, already_claimed=True)
 
 
 def process_facebook_message(sender_id: str, message_text: str, event_id: str = ""):
@@ -651,12 +651,12 @@ def process_facebook_message(sender_id: str, message_text: str, event_id: str = 
     dedupe_key = f"facebook-messenger:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
     if not _claim_contact_event(dedupe_key):
         return
+    notify_admin_contact("Facebook Messenger", "ข้อความใหม่", dedupe_key, already_claimed=True)
     try:
         log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
                            source="Facebook Messenger")
     except Exception:
         app.logger.exception("Could not write Facebook Messenger CRM event")
-    notify_admin_contact("Facebook Messenger", "ข้อความใหม่", dedupe_key, already_claimed=True)
 
     if message_text and not message_text.startswith("[ลูกค้าส่งไฟล์แนบ]"):
         reply_text = ask_wm_design_multimodal("facebook:" + sender_id, message_text)
@@ -668,12 +668,12 @@ def _process_instagram_message(sender_id, message_text, event_id):
     dedupe_key = f"instagram-message:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
     if not _claim_contact_event(dedupe_key):
         return
+    notify_admin_contact("Instagram Direct", "ข้อความใหม่", dedupe_key, already_claimed=True)
     try:
         log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
                            source="Instagram Direct")
     except Exception:
         app.logger.exception("Could not write Instagram Direct CRM event")
-    notify_admin_contact("Instagram Direct", "ข้อความใหม่", dedupe_key, already_claimed=True)
 
 
 @app.get("/facebook-webhook")
