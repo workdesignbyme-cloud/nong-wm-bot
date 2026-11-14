@@ -7,8 +7,10 @@ import base64
 import hashlib
 import logging
 import threading
+import re
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+from urllib.parse import urlsplit
 
 import requests
 from flask import Flask, request, send_file
@@ -31,6 +33,9 @@ META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN", "").strip()
 META_APP_SECRET = os.environ.get("META_APP_SECRET", "").strip()
 FACEBOOK_PAGE_ACCESS_TOKEN = os.environ.get("FACEBOOK_PAGE_ACCESS_TOKEN", "").strip()
 PROMO_CAMPAIGN_SECRET = os.environ.get("PROMO_CAMPAIGN_SECRET", "").strip()
+# Optional non-secret deep link copied from the LINE OA Manager chat screen. If it
+# is not configured, alerts still open the LINE OA Manager home page.
+LINE_OA_CHAT_URL = os.environ.get("LINE_OA_CHAT_URL", "https://manager.line.biz/").strip()
 PUBLIC_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://nong-wm-bot.onrender.com").rstrip("/")
 PORT = int(os.environ.get("PORT", "5005"))
 
@@ -38,6 +43,15 @@ app = Flask(__name__)
 app.logger.setLevel(logging.INFO)
 
 PORTFOLIO_URL = "https://www.facebook.com/workdesignbymephuketV2"
+META_BUSINESS_INBOX_URL = "https://business.facebook.com/latest/inbox/all"
+_SAFE_ALERT_SOURCE_HOSTS = {
+    "business.facebook.com",
+    "www.facebook.com",
+    "facebook.com",
+    "manager.line.biz",
+    "chat.line.biz",
+}
+_META_OBJECT_ID_PATTERN = re.compile(r"^[0-9_]+$")
 ACCOUNT_TEXT = (
     "น้อง WM ดีไซน์ 🤖 ได้เลยค่ะคุณลูกค้า ส่งข้อมูลให้ตามนี้นะคะ 😊\n\n"
     "💸 ชื่อบัญชี: เวิร์คดีไซน์ บายมี โดย น.ส. วัลภา เพ็ชรไทย\n"
@@ -499,7 +513,45 @@ def _claim_contact_event(event_key):
         return True
 
 
-def notify_admin_contact(source, interaction, event_key, already_claimed=False):
+def _safe_alert_source_url(url):
+    """Return only a known HTTPS destination so webhook data cannot inject a link."""
+    if not isinstance(url, str) or len(url) > 2048:
+        return ""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return ""
+    if parsed.scheme != "https" or parsed.hostname not in _SAFE_ALERT_SOURCE_HOSTS:
+        return ""
+    return url
+
+
+def _facebook_comment_source_url(value):
+    """Build a direct Page-comment URL only from well-formed Meta object IDs."""
+    post_id = str((value or {}).get("post_id") or "").strip()
+    comment_id = str((value or {}).get("comment_id") or (value or {}).get("id") or "").strip()
+    if _META_OBJECT_ID_PATTERN.fullmatch(post_id):
+        if _META_OBJECT_ID_PATTERN.fullmatch(comment_id):
+            return f"https://www.facebook.com/{post_id}?comment_id={comment_id}"
+        return f"https://www.facebook.com/{post_id}"
+    return META_BUSINESS_INBOX_URL
+
+
+def _format_admin_contact_alert(source, interaction, source_url=""):
+    """Build a privacy-safe alert; it never includes customer names, messages, or IDs."""
+    message = (
+        "🔔 WM Design — มีผู้ติดต่อใหม่\n"
+        f"ช่องทาง: {source}\n"
+        f"รายการ: {interaction}\n"
+        "กรุณาตรวจสอบกล่องข้อความ/คอมเมนต์ใน LINE OA หรือ Meta Business Suite"
+    )
+    safe_url = _safe_alert_source_url(source_url)
+    if safe_url:
+        message += f"\n\nเปิดเพื่อตอบกลับ: {safe_url}"
+    return message
+
+
+def notify_admin_contact(source, interaction, event_key, already_claimed=False, source_url=""):
     """Send a privacy-safe LINE alert only while free monthly push quota remains."""
     if not already_claimed and not _claim_contact_event(event_key):
         return False
@@ -515,12 +567,7 @@ def notify_admin_contact(source, interaction, event_key, already_claimed=False):
         app.logger.warning("LINE free push quota exhausted; contact alert skipped")
         return False
 
-    message = (
-        "🔔 WM Design — มีผู้ติดต่อใหม่\n"
-        f"ช่องทาง: {source}\n"
-        f"รายการ: {interaction}\n"
-        "กรุณาตรวจสอบกล่องข้อความ/คอมเมนต์ใน LINE OA หรือ Meta Business Suite"
-    )
+    message = _format_admin_contact_alert(source, interaction, source_url)
     try:
         response = requests.post(
             "https://api.line.me/v2/bot/message/push",
@@ -633,10 +680,10 @@ def send_facebook_message(recipient_id: str, text: str) -> bool:
         return False
 
 
-def _process_meta_comment(source, interaction, dedupe_key, customer_ref, comment_text=""):
+def _process_meta_comment(source, interaction, dedupe_key, customer_ref, comment_text="", source_url=""):
     if not _claim_contact_event(dedupe_key):
         return
-    notify_admin_contact(source, interaction, dedupe_key, already_claimed=True)
+    notify_admin_contact(source, interaction, dedupe_key, already_claimed=True, source_url=source_url)
     if customer_ref and comment_text:
         try:
             log_customer_event(customer_ref, comment_text, "", False, source=source)
@@ -650,7 +697,10 @@ def process_facebook_message(sender_id: str, message_text: str, event_id: str = 
     dedupe_key = f"facebook-messenger:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
     if not _claim_contact_event(dedupe_key):
         return
-    notify_admin_contact("Facebook Messenger", "ข้อความใหม่", dedupe_key, already_claimed=True)
+    notify_admin_contact(
+        "Facebook Messenger", "ข้อความใหม่", dedupe_key,
+        already_claimed=True, source_url=META_BUSINESS_INBOX_URL
+    )
     try:
         log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
                            source="Facebook Messenger")
@@ -667,7 +717,10 @@ def _process_instagram_message(sender_id, message_text, event_id):
     dedupe_key = f"instagram-message:{event_id or hashlib.sha256((sender_id + message_text).encode()).hexdigest()}"
     if not _claim_contact_event(dedupe_key):
         return
-    notify_admin_contact("Instagram Direct", "ข้อความใหม่", dedupe_key, already_claimed=True)
+    notify_admin_contact(
+        "Instagram Direct", "ข้อความใหม่", dedupe_key,
+        already_claimed=True, source_url=META_BUSINESS_INBOX_URL
+    )
     try:
         log_customer_event(sender_id, message_text or "[ข้อความ/ไฟล์แนบ]", "", False,
                            source="Instagram Direct")
@@ -734,7 +787,7 @@ def facebook_webhook_receive():
                     target=_process_meta_comment,
                     args=("Facebook Page comment", "คอมเมนต์ใหม่",
                           f"facebook-comment:{entry_id}:{comment_id}", customer_ref,
-                          value.get("message", "")), daemon=True
+                          value.get("message", ""), _facebook_comment_source_url(value)), daemon=True
                 ).start()
             elif channel == "instagram" and field in {"comments", "live_comments", "mentions"}:
                 comment_id = str(value.get("comment_id") or value.get("id") or "")
@@ -746,7 +799,8 @@ def facebook_webhook_receive():
                 threading.Thread(
                     target=_process_meta_comment,
                     args=("Instagram", kind, f"instagram-{field}:{entry_id}:{comment_id}",
-                          customer_ref, value.get("text") or value.get("message", "")), daemon=True
+                          customer_ref, value.get("text") or value.get("message", ""),
+                          META_BUSINESS_INBOX_URL), daemon=True
                 ).start()
     return "OK", 200
 
@@ -863,7 +917,7 @@ def callback():
             continue
         threading.Thread(
             target=notify_admin_contact,
-            args=("LINE Official Account", "ข้อความ/รูปใหม่", contact_event_key, True),
+            args=("LINE Official Account", "ข้อความ/รูปใหม่", contact_event_key, True, LINE_OA_CHAT_URL),
             daemon=True
         ).start()
 
