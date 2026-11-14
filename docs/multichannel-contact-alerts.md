@@ -1,6 +1,6 @@
 # การแจ้งเตือนผู้ติดต่อลูกค้าหลายช่องทางผ่าน LINE
 
-การอัปเดตนี้ใช้ Render service, LINE Messaging API, Meta Webhooks และ Google Sheets CRM ที่มีอยู่ ไม่มีบริการเสียเงินหรือ Environment Variable ใหม่
+การอัปเดตนี้ใช้ Render service, LINE Messaging API, Meta Webhooks และ Google Sheets CRM ที่มีอยู่ ไม่มีบริการเสียเงินเพิ่ม
 
 ## Event ที่โค้ดรองรับ
 
@@ -10,6 +10,14 @@
 - Instagram: Direct messages, comments, live comments และ mentions เมื่อ Meta ส่ง event มาถึง webhook
 
 LINE alert แสดงเฉพาะช่องทางและประเภทการติดต่อ ไม่ส่งข้อความลูกค้า ชื่อ หรือ ID ดิบ ระบบบันทึก CRM ด้วย customer key แบบ hash และไม่ตอบคอมเมนต์หรือ Instagram อัตโนมัติ ส่วน Messenger ยังคงใช้การตอบกลับเดิม
+
+ทุก alert มีลิงก์ `เปิดเพื่อตอบกลับ` ที่สร้างโดยระบบเท่านั้น:
+
+- Facebook Page comment: เปิดไปยังโพสต์/คอมเมนต์นั้นโดยตรงเมื่อ Meta ส่ง `post_id` และ `comment_id` ที่ถูกต้อง; หากข้อมูลไม่ครบจะเปิด Meta Business Suite Inbox แทน
+- Facebook Messenger, Instagram Direct, Instagram comments/mentions: เปิด [Meta Business Suite Inbox](https://business.facebook.com/latest/inbox/all)
+- LINE Official Account: เปิด LINE OA Manager; หากต้องการให้เข้าหน้าแชทของ OA โดยตรง ให้เพิ่มค่า Render แบบไม่ลับ `LINE_OA_CHAT_URL` เป็น URL ที่คัดลอกจากหน้า Chat ของ LINE OA Manager (ต้องเป็น `https://manager.line.biz/...` หรือ `https://chat.line.biz/...`)
+
+ระบบตรวจเฉพาะ HTTPS domain ที่อนุญาตก่อนส่งลิงก์ จึงไม่รับ URL จาก webhook มาวางใน alert โดยตรง
 
 ## ตั้งค่า Meta
 
