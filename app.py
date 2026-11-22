@@ -36,6 +36,11 @@ PROMO_CAMPAIGN_SECRET = os.environ.get("PROMO_CAMPAIGN_SECRET", "").strip()
 # Optional non-secret deep link copied from the LINE OA Manager chat screen. If it
 # is not configured, alerts still open the LINE OA Manager home page.
 LINE_OA_CHAT_URL = os.environ.get("LINE_OA_CHAT_URL", "https://manager.line.biz/").strip()
+# Optional privacy-minimized notification relay to WM Command Center.
+# Requires BOTH values in Render; does nothing when unset.
+WM_DASHBOARD_RELAY_URL = os.environ.get("WM_DASHBOARD_RELAY_URL", "").strip()
+WM_DASHBOARD_RELAY_SECRET = os.environ.get("WM_DASHBOARD_RELAY_SECRET", "").strip()
+
 PUBLIC_BASE_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://nong-wm-bot.onrender.com").rstrip("/")
 PORT = int(os.environ.get("PORT", "5005"))
 
@@ -833,6 +838,32 @@ def monthly_promo_campaign():
         return {"error": "Campaign failed"}, 500
 
 
+def send_wm_dashboard_notice(event_id: str, message_type: str) -> None:
+    """Best-effort notification relay; never sends user IDs, text, tokens, or media."""
+    if (not WM_DASHBOARD_RELAY_URL or len(WM_DASHBOARD_RELAY_SECRET) < 24
+            or WM_DASHBOARD_RELAY_URL !=
+            "https://wm-ai-command-center.onrender.com/api/ingest/line"):
+        return
+    data = json.dumps({
+        "kind": "line_notice",
+        "id": hashlib.sha256(event_id.encode("utf-8")).hexdigest(),
+        "type": "image" if message_type == "image" else "text"
+    }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(WM_DASHBOARD_RELAY_SECRET.encode("utf-8"), data, hashlib.sha256).hexdigest()
+    try:
+        response = requests.post(
+            WM_DASHBOARD_RELAY_URL,
+            data=data,
+            headers={"Content-Type": "application/json",
+                     "X-WM-Relay-Signature": signature},
+            timeout=3
+        )
+        if response.status_code >= 300:
+            app.logger.warning("WM dashboard relay HTTP %s", response.status_code)
+    except requests.RequestException:
+        app.logger.warning("WM dashboard relay unavailable; LINE processing unaffected")
+
+
 @app.get("/")
 def health():
     return "WM Design LINE bot is running", 200
@@ -915,6 +946,12 @@ def callback():
         contact_event_key = f"line:{event_id}"
         if not _claim_contact_event(contact_event_key):
             continue
+        if WM_DASHBOARD_RELAY_URL and len(WM_DASHBOARD_RELAY_SECRET) >= 24:
+            threading.Thread(
+                target=send_wm_dashboard_notice,
+                args=(event_id, message_type),
+                daemon=True
+            ).start()
         threading.Thread(
             target=notify_admin_contact,
             args=("LINE Official Account", "ข้อความ/รูปใหม่", contact_event_key, True, LINE_OA_CHAT_URL),
