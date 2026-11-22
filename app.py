@@ -774,6 +774,11 @@ def facebook_webhook_receive():
             event_id = str(message.get("mid") or event.get("timestamp") or "")
             target = process_facebook_message if channel == "page" else _process_instagram_message
             threading.Thread(target=target, args=(sender_id, message_text, event_id), daemon=True).start()
+            if WM_DASHBOARD_RELAY_URL and len(WM_DASHBOARD_RELAY_SECRET) >= 24:
+                source_name = "Facebook" if channel == "page" else "Instagram"
+                threading.Thread(target=send_wm_dashboard_notice,
+                                 args=(f"{entry_id}:{event_id}:{sender_id}", "text", message_text, source_name),
+                                 daemon=True).start()
 
         for change in entry.get("changes", []):
             field = change.get("field", "")
@@ -794,6 +799,11 @@ def facebook_webhook_receive():
                           f"facebook-comment:{entry_id}:{comment_id}", customer_ref,
                           value.get("message", ""), _facebook_comment_source_url(value)), daemon=True
                 ).start()
+                if WM_DASHBOARD_RELAY_URL and len(WM_DASHBOARD_RELAY_SECRET) >= 24:
+                    threading.Thread(target=send_wm_dashboard_notice,
+                                     args=(f"fb-comment:{entry_id}:{comment_id}", "text",
+                                           value.get("message", ""), "Facebook"),
+                                     daemon=True).start()
             elif channel == "instagram" and field in {"comments", "live_comments", "mentions"}:
                 comment_id = str(value.get("comment_id") or value.get("id") or "")
                 if not comment_id:
@@ -807,6 +817,11 @@ def facebook_webhook_receive():
                           customer_ref, value.get("text") or value.get("message", ""),
                           META_BUSINESS_INBOX_URL), daemon=True
                 ).start()
+                if WM_DASHBOARD_RELAY_URL and len(WM_DASHBOARD_RELAY_SECRET) >= 24:
+                    threading.Thread(target=send_wm_dashboard_notice,
+                                     args=(f"ig-comment:{entry_id}:{comment_id}", "text",
+                                           value.get("text") or value.get("message") or "", "Instagram"),
+                                     daemon=True).start()
     return "OK", 200
 
 
@@ -838,16 +853,20 @@ def monthly_promo_campaign():
         return {"error": "Campaign failed"}, 500
 
 
-def send_wm_dashboard_notice(event_id: str, message_type: str) -> None:
-    """Best-effort notification relay; never sends user IDs, text, tokens, or media."""
+def send_wm_dashboard_notice(event_id: str, message_type: str, preview: str = "", source: str = "LINE") -> None:
+    """Send signed text previews without user IDs, tokens or media payloads."""
+    if source not in {"LINE", "Facebook", "Instagram"}:
+        return
     if (not WM_DASHBOARD_RELAY_URL or len(WM_DASHBOARD_RELAY_SECRET) < 24
             or WM_DASHBOARD_RELAY_URL !=
             "https://wm-ai-command-center.onrender.com/api/ingest/line"):
         return
     data = json.dumps({
-        "kind": "line_notice",
-        "id": hashlib.sha256(event_id.encode("utf-8")).hexdigest(),
-        "type": "image" if message_type == "image" else "text"
+        "kind": "line_notice" if source == "LINE" else "meta_notice",
+        "source": source,
+        "id": hashlib.sha256((source + ":" + event_id).encode("utf-8")).hexdigest(),
+        "type": "image" if message_type == "image" else "text",
+        "preview": re.sub(r"[\\x00-\\x1f\\x7f]", " ", str(preview or "")).strip()[:180]
     }, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     signature = hmac.new(WM_DASHBOARD_RELAY_SECRET.encode("utf-8"), data, hashlib.sha256).hexdigest()
     try:
@@ -949,7 +968,7 @@ def callback():
         if WM_DASHBOARD_RELAY_URL and len(WM_DASHBOARD_RELAY_SECRET) >= 24:
             threading.Thread(
                 target=send_wm_dashboard_notice,
-                args=(event_id, message_type),
+                args=(event_id, message_type, text, "LINE"),
                 daemon=True
             ).start()
         threading.Thread(
